@@ -1,9 +1,13 @@
 package com.tryonwardrobe.app.ui.screens
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -16,15 +20,24 @@ import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Archive
+import androidx.compose.material.icons.rounded.BarChart
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.Unarchive
 import androidx.compose.material.icons.rounded.WifiFind
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
@@ -45,6 +58,10 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.tryonwardrobe.app.data.preferences.SettingsDataStore
 import com.tryonwardrobe.app.service.ai.GeminiWardrobeService
+import com.tryonwardrobe.app.ui.ApiUsageSummary
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun ApiKeySettingsDialog(
@@ -53,8 +70,13 @@ fun ApiKeySettingsDialog(
     initialTryOnModel: String,
     isTestingConnection: Boolean,
     connectionTestResult: GeminiWardrobeService.ConnectionTestResult?,
+    usageSummary: ApiUsageSummary,
+    isRunningBackupOrRestore: Boolean,
     onTestConnection: (apiKey: String, taggingModelId: String, tryOnModelId: String) -> Unit,
     onClearTestResult: () -> Unit,
+    onResetUsageStats: () -> Unit,
+    onExportBackupZip: (Uri) -> Unit,
+    onImportBackupZip: (Uri, Boolean) -> Unit,
     onDismiss: () -> Unit,
     onSave: (apiKey: String, taggingModelId: String, tryOnModelId: String) -> Unit
 ) {
@@ -62,12 +84,29 @@ fun ApiKeySettingsDialog(
     var selectedTaggingModel by remember(initialTaggingModel) { mutableStateOf(initialTaggingModel) }
     var selectedTryOnModel by remember(initialTryOnModel) { mutableStateOf(initialTryOnModel) }
     var showKey by remember { mutableStateOf(false) }
+    var overwriteOnRestore by remember { mutableStateOf(false) }
+
+    val exportZipLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        if (uri != null) {
+            onExportBackupZip(uri)
+        }
+    }
+
+    val importZipLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            onImportBackupZip(uri, overwriteOnRestore)
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                text = "Gemini API 與模型設定",
+                text = "Gemini API、用量與備份設定",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold
             )
@@ -192,8 +231,6 @@ fun ApiKeySettingsDialog(
                     }
                 }
 
-                Spacer(Modifier.height(2.dp))
-
                 // Selector 1: Tagging & Styling Logic Model (JSON Mode)
                 Text(
                     text = "1. 衣物打標與智慧配對模型（JSON Mode）",
@@ -213,8 +250,6 @@ fun ApiKeySettingsDialog(
                     )
                 }
 
-                Spacer(Modifier.height(4.dp))
-
                 // Selector 2: Photorealistic Virtual Try-On Model (Multi-Image)
                 Text(
                     text = "2. 寫實換裝合成模型（Multi-Image）",
@@ -233,6 +268,146 @@ fun ApiKeySettingsDialog(
                         }
                     )
                 }
+
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                // 3. API Token Usage & Estimated Cost Dashboard Card
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Rounded.BarChart,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.secondary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = "📊 API 用量與預估費用儀表板",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            TextButton(
+                                onClick = onResetUsageStats,
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Icon(Icons.Rounded.DeleteSweep, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(Modifier.width(2.dp))
+                                Text("重設統計", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+
+                        Text(
+                            text = "• 今日統計：呼叫 ${usageSummary.todayCalls} 次 ｜ ${usageSummary.todayTokens} Tokens ｜ 生圖 ${usageSummary.todayImages} 張",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Text(
+                            text = "• 本月累計：呼叫 ${usageSummary.monthCalls} 次 ｜ ${usageSummary.monthTokens} Tokens ｜ 生圖 ${usageSummary.monthImages} 張",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Text(
+                            text = String.format(
+                                Locale.US,
+                                "• 本月預估參考費用：約 $%.4f USD（約 NT$%.1f TWD）",
+                                usageSummary.estimatedMonthUsd,
+                                usageSummary.estimatedMonthTwd
+                            ),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.secondary,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                // 4. One-Click ZIP Backup & Restore Card
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "📦 衣櫃完整資料庫一鍵打包備份與還原 (.zip)",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "將單品清單、個人色彩身形檔案 (backup_manifest.json) 與所有去背圖、全身基準照打包為單一 ZIP 檔。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "還原模式：",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                            FilterChip(
+                                selected = !overwriteOnRestore,
+                                onClick = { overwriteOnRestore = false },
+                                label = { Text("合併現有衣櫃", style = MaterialTheme.typography.labelSmall) }
+                            )
+                            FilterChip(
+                                selected = overwriteOnRestore,
+                                onClick = { overwriteOnRestore = true },
+                                label = { Text("覆蓋還原", style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            FilledTonalButton(
+                                onClick = {
+                                    val dateStr = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
+                                    exportZipLauncher.launch("FitStudioAI_Backup_$dateStr.zip")
+                                },
+                                enabled = !isRunningBackupOrRestore,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Rounded.Archive, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("匯出備份 (.zip)", style = MaterialTheme.typography.labelMedium)
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    importZipLauncher.launch(arrayOf("application/zip", "application/octet-stream"))
+                                },
+                                enabled = !isRunningBackupOrRestore,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Rounded.Unarchive, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("從備份還原", style = MaterialTheme.typography.labelMedium)
+                            }
+                        }
+                    }
+                }
             }
         },
         confirmButton = {
@@ -244,7 +419,7 @@ fun ApiKeySettingsDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text("取消")
+                Text("關閉")
             }
         }
     )

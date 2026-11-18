@@ -6,6 +6,7 @@ import com.tryonwardrobe.app.data.local.WardrobeDatabase
 import com.tryonwardrobe.app.data.preferences.SettingsDataStore
 import com.tryonwardrobe.app.data.repository.WardrobeRepository
 import com.tryonwardrobe.app.service.ai.GeminiWardrobeService
+import com.tryonwardrobe.app.service.backup.WardrobeBackupManager
 import com.tryonwardrobe.app.service.vision.BackgroundRemover
 
 class WardrobeApplication : Application() {
@@ -19,6 +20,12 @@ class WardrobeApplication : Application() {
             dao = database.wardrobeDao(),
             settings = settingsDataStore,
             imageStorage = safeImageStorage
+        )
+    }
+    val wardrobeBackupManager: WardrobeBackupManager by lazy {
+        WardrobeBackupManager(
+            context = applicationContext,
+            repository = wardrobeRepository
         )
     }
     val backgroundRemover: BackgroundRemover by lazy { BackgroundRemover(applicationContext) }

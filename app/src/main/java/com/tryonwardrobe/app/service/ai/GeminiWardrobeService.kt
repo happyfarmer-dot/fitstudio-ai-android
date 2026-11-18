@@ -8,7 +8,13 @@ import com.google.gson.Gson
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.tryonwardrobe.app.data.catalog.MallBrandItem
+import com.tryonwardrobe.app.data.local.ApiUsageRecord
 import com.tryonwardrobe.app.data.local.ClothingItem
+import com.tryonwardrobe.app.data.preferences.PersonalStyleProfile
+import com.tryonwardrobe.app.data.preferences.SettingsDataStore
+import com.tryonwardrobe.app.data.repository.OuterStylingMode
+import com.tryonwardrobe.app.data.repository.TopStylingMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -54,6 +60,21 @@ class GeminiWardrobeService {
         val itemIds: List<Long>
     )
 
+    data class MallOutfitRecommendation(
+        val title: String,
+        val rationale: String,
+        val mallItemIds: List<String>,
+        val wardrobeItemIds: List<Long> = emptyList()
+    )
+
+    data class PersonalProfileAnalysisDto(
+        val personalColorSeason: String? = null,
+        val bodyShape: String? = null,
+        val recommendedColors: String? = null,
+        val avoidColors: String? = null,
+        val fitAdvice: String? = null
+    )
+
     data class ConnectionTestResult(
         val success: Boolean,
         val testedTaggingModel: String,
@@ -63,8 +84,35 @@ class GeminiWardrobeService {
         val message: String
     )
 
+    data class UsageMetrics(
+        val promptTokens: Int,
+        val candidateTokens: Int,
+        val totalTokens: Int,
+        val generatedImages: Int
+    ) {
+        fun toRecord(modelId: String, taskType: String): ApiUsageRecord {
+            return ApiUsageRecord(
+                modelId = modelId,
+                taskType = taskType,
+                promptTokens = promptTokens,
+                candidateTokens = candidateTokens,
+                totalTokens = totalTokens,
+                generatedImages = generatedImages
+            )
+        }
+    }
+
+    data class GeminiTrackedResult<T>(
+        val data: T,
+        val usage: UsageMetrics
+    )
+
     private data class OutfitResponseDto(
         val outfits: List<OutfitRecommendation>? = null
+    )
+
+    private data class MallOutfitResponseDto(
+        val outfits: List<MallOutfitRecommendation>? = null
     )
 
     private val gson = Gson()
@@ -130,7 +178,6 @@ class GeminiWardrobeService {
         }
         val tagLatencyMs = SystemClock.elapsedRealtime() - startTagMs
 
-        // Probe the selected image-editing model via POST :generateContent (maxOutputTokens = 5)
         val startTryOnMs = SystemClock.elapsedRealtime()
         try {
             executeGenerateContent(
@@ -178,14 +225,13 @@ class GeminiWardrobeService {
     }
 
     /**
-     * Stage 2 Background Auto-Tagging: Uses the user-selected tagging model from DataStore
-     * with structured JSON output.
+     * Stage 2 Background Auto-Tagging supporting all 10 expanded wardrobe categories.
      */
     suspend fun autoTagGarment(
         apiKey: String,
         modelId: String,
         garmentBitmap: Bitmap
-    ): GarmentTagResult = withContext(Dispatchers.IO) {
+    ): GeminiTrackedResult<GarmentTagResult> = withContext(Dispatchers.IO) {
         if (apiKey.isBlank()) {
             throw GeminiApiException(null, null, "尚未設定 Gemini API Key，請先於右上角設定輸入後重試")
         }
@@ -208,7 +254,20 @@ class GeminiWardrobeService {
             add(JsonObject().apply {
                 addProperty(
                     "text",
-                    "請辨識這張服飾或鞋履單品圖片，以繁體中文輸出精準結構化衣櫃標籤。"
+                    """
+                    請辨識這張服飾、鞋履或穿搭配件圖片，以繁體中文輸出精準結構化衣櫃標籤。
+                    十大分類定義：
+                    - 上衣（T恤、襯衫、針織衫、衛衣、背心等）
+                    - 下著（長褲、短褲、牛仔褲、西裝褲、長裙、短裙等）
+                    - 外套（西裝外套、夾克、風衣、大衣、開襟外套、羽絨衣等）
+                    - 連身（洋裝、連身褲、吊帶褲等）
+                    - 鞋履（運動鞋、樂福鞋、靴子、涼鞋、皮鞋等）
+                    - 帽子圍巾（毛帽、鴨舌帽、漁夫帽、圍巾、絲巾等）
+                    - 眼鏡（光學眼鏡、墨鏡、太陽眼鏡等）
+                    - 髮飾（髮夾、髮箍、鯊魚夾、髮帶等）
+                    - 包袋（托特包、斜背包、後背包、手提包、半月包等）
+                    - 飾品配件（手錶、項鍊、耳環、皮帶、襪子等）
+                    """.trimIndent()
                 )
             })
         }
@@ -219,16 +278,16 @@ class GeminiWardrobeService {
                 add("category", JsonObject().apply {
                     addProperty("type", "STRING")
                     add("enum", JsonArray().apply {
-                        add("上衣"); add("下著"); add("外套"); add("連身"); add("鞋履")
+                        ClothingItem.ALL_CATEGORIES.forEach { add(it) }
                     })
                 })
                 add("subCategory", JsonObject().apply {
                     addProperty("type", "STRING")
-                    addProperty("description", "具體單品名稱，例如：重磅白T、水洗直筒牛仔褲、飛行夾克、樂福鞋")
+                    addProperty("description", "具體單品名稱，例如：重磅白T、水洗直筒牛仔褲、漁夫帽、玳瑁墨鏡、斜背半月包")
                 })
                 add("color", JsonObject().apply {
                     addProperty("type", "STRING")
-                    addProperty("description", "主色系中文描述，例如：奶油白、炭黑、深海軍藍、軍綠")
+                    addProperty("description", "主色系中文描述，例如：奶油白、炭黑、深海軍藍、琥珀棕")
                 })
                 add("fit", JsonObject().apply {
                     addProperty("type", "STRING")
@@ -239,7 +298,7 @@ class GeminiWardrobeService {
                 add("styleTags", JsonObject().apply {
                     addProperty("type", "ARRAY")
                     add("items", JsonObject().apply { addProperty("type", "STRING") })
-                    addProperty("description", "2至3個風格標籤，例如：極簡、美式復古、Smart Casual、街頭、運動休閒")
+                    addProperty("description", "2至3個風格標籤，例如：日系簡約、韓系質感、City Boy 城市機能、Clean Fit 極簡俐落、美式街頭、戶外山系 Gorpcore")
                 })
                 add("season", JsonObject().apply {
                     addProperty("type", "ARRAY")
@@ -272,23 +331,125 @@ class GeminiWardrobeService {
             modelId = modelId,
             payload = payload
         )
+        val usage = parseUsageMetrics(rawResponse, generatedImages = 0)
         val jsonText = extractFirstTextPart(rawResponse)
         val parsed = runCatching { gson.fromJson(jsonText, GarmentTagResult::class.java) }.getOrNull()
 
-        GarmentTagResult(
-            category = parsed?.category?.takeIf { it in listOf("上衣", "下著", "外套", "連身", "鞋履") } ?: "上衣",
+        val result = GarmentTagResult(
+            category = parsed?.category?.takeIf { it in ClothingItem.ALL_CATEGORIES } ?: ClothingItem.CAT_TOP,
             subCategory = parsed?.subCategory?.takeIf { it.isNotBlank() } ?: "基本款單品",
             color = parsed?.color?.takeIf { it.isNotBlank() } ?: "中性色",
             fit = parsed?.fit?.takeIf { it in listOf("緊身", "合身", "寬鬆") } ?: "合身",
-            styleTags = parsed?.styleTags?.filter { it.isNotBlank() }?.ifEmpty { listOf("簡約") } ?: listOf("簡約"),
+            styleTags = parsed?.styleTags?.filter { it.isNotBlank() }?.ifEmpty { listOf("日系簡約") } ?: listOf("日系簡約"),
             season = parsed?.season?.filter { it in listOf("春", "夏", "秋", "冬") }
                 ?.ifEmpty { listOf("春", "秋") } ?: listOf("春", "秋")
         )
+        GeminiTrackedResult(data = result, usage = usage)
     }
 
     /**
-     * Stage 1 AI Stylist: Sends lightweight metadata JSON (zero images)
-     * to the user-selected tagging/styling model from DataStore.
+     * AI Personal Color (4-Season) & Body Silhouette Analysis from Full-Body Base Photo.
+     */
+    suspend fun analyzePersonalColorAndBody(
+        apiKey: String,
+        modelId: String,
+        personBitmap: Bitmap
+    ): GeminiTrackedResult<PersonalStyleProfile> = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) {
+            throw GeminiApiException(null, null, "請先於右上角設定頁輸入 Gemini API Key")
+        }
+
+        val prepared = resizeIfNeeded(personBitmap, maxEdge = 1024)
+        val imgBase64 = bitmapToBase64(prepared, Bitmap.CompressFormat.JPEG, 90)
+
+        val parts = JsonArray().apply {
+            add(JsonObject().apply {
+                add("inlineData", JsonObject().apply {
+                    addProperty("mimeType", "image/jpeg")
+                    addProperty("data", imgBase64)
+                })
+            })
+            add(JsonObject().apply {
+                addProperty(
+                    "text",
+                    """
+                    請根據這張全身基準照的膚色冷暖色調、髮色對比度與全身肩腰臀腿輪廓比例，進行專業「四季型個人色彩」與「身形輪廓」視覺推論分析。
+                    請以繁體中文回傳結構化 JSON：
+                    1. personalColorSeason：必選其一 ["春暖型", "夏冷型", "秋暖型", "冬冷型"]
+                    2. bodyShape：必選其一 ["H 型（直筒勻稱）", "倒三角（寬肩挺拔）", "梨形（下身穩重）", "沙漏型（腰線明顯）", "O 型（圓潤舒適）"]
+                    3. recommendedColors：最適合襯托膚色的 4~6 種具體穿搭色系建議（35字內）
+                    4. avoidColors：建議避開或僅作小面積點綴的避雷色系（30字內）
+                    5. fitAdvice：針對該身形輪廓的上下身版型、領口、紮衣服或外套剪裁修飾建議（45字內）
+                    """.trimIndent()
+                )
+            })
+        }
+
+        val schema = JsonObject().apply {
+            addProperty("type", "OBJECT")
+            add("properties", JsonObject().apply {
+                add("personalColorSeason", JsonObject().apply {
+                    addProperty("type", "STRING")
+                    add("enum", JsonArray().apply {
+                        SettingsDataStore.PERSONAL_COLOR_OPTIONS.forEach { add(it.id) }
+                    })
+                })
+                add("bodyShape", JsonObject().apply {
+                    addProperty("type", "STRING")
+                    add("enum", JsonArray().apply {
+                        SettingsDataStore.BODY_SHAPE_OPTIONS.forEach { add(it.id) }
+                    })
+                })
+                add("recommendedColors", JsonObject().apply { addProperty("type", "STRING") })
+                add("avoidColors", JsonObject().apply { addProperty("type", "STRING") })
+                add("fitAdvice", JsonObject().apply { addProperty("type", "STRING") })
+            })
+            add("required", JsonArray().apply {
+                add("personalColorSeason")
+                add("bodyShape")
+                add("recommendedColors")
+                add("avoidColors")
+                add("fitAdvice")
+            })
+        }
+
+        val payload = JsonObject().apply {
+            add("contents", JsonArray().apply {
+                add(JsonObject().apply { add("parts", parts) })
+            })
+            add("generationConfig", JsonObject().apply {
+                addProperty("temperature", 0.3)
+                addProperty("responseMimeType", "application/json")
+                add("responseSchema", schema)
+            })
+        }
+
+        val rawResponse = executeGenerateContent(apiKey, modelId, payload)
+        val usage = parseUsageMetrics(rawResponse, generatedImages = 0)
+        val jsonText = extractFirstTextPart(rawResponse)
+        val dto = runCatching { gson.fromJson(jsonText, PersonalProfileAnalysisDto::class.java) }.getOrNull()
+
+        val matchedSeason = SettingsDataStore.PERSONAL_COLOR_OPTIONS.find {
+            it.id == dto?.personalColorSeason
+        } ?: SettingsDataStore.PERSONAL_COLOR_OPTIONS.first()
+
+        val matchedShape = SettingsDataStore.BODY_SHAPE_OPTIONS.find {
+            it.id == dto?.bodyShape
+        } ?: SettingsDataStore.BODY_SHAPE_OPTIONS.first()
+
+        val profile = PersonalStyleProfile(
+            personalColorSeason = matchedSeason.id,
+            bodyShape = matchedShape.id,
+            recommendedColors = dto?.recommendedColors?.takeIf { it.isNotBlank() } ?: matchedSeason.recommendedColors,
+            avoidColors = dto?.avoidColors?.takeIf { it.isNotBlank() } ?: matchedSeason.avoidColors,
+            fitAdvice = dto?.fitAdvice?.takeIf { it.isNotBlank() } ?: matchedShape.fitAdvice,
+            updatedAt = System.currentTimeMillis()
+        )
+        GeminiTrackedResult(data = profile, usage = usage)
+    }
+
+    /**
+     * Stage 1 AI Stylist: Sends lightweight metadata JSON (zero images) + Personal Color & Body Shape profile.
      */
     suspend fun recommendOutfits(
         apiKey: String,
@@ -296,8 +457,9 @@ class GeminiWardrobeService {
         wardrobe: List<ClothingItem>,
         stylePreset: String,
         customRequest: String,
-        anchorItemId: Long? = null
-    ): List<OutfitRecommendation> = withContext(Dispatchers.IO) {
+        anchorItemId: Long? = null,
+        personalProfile: PersonalStyleProfile? = null
+    ): GeminiTrackedResult<List<OutfitRecommendation>> = withContext(Dispatchers.IO) {
         if (apiKey.isBlank()) {
             throw GeminiApiException(null, null, "請先於右上角設定頁輸入 Gemini API Key")
         }
@@ -311,6 +473,7 @@ class GeminiWardrobeService {
                     addProperty("subCategory", item.subCategory)
                     addProperty("color", item.color)
                     addProperty("fit", item.fit)
+                    addProperty("wearCount", item.wearCount)
                     add("styleTags", gson.toJsonTree(item.styleTags))
                     add("season", gson.toJsonTree(item.season))
                 })
@@ -318,8 +481,17 @@ class GeminiWardrobeService {
         }
 
         val promptBuilder = StringBuilder().apply {
-            appendLine("你是專業造型師。請僅從以下使用者的衣櫃清單中挑選 2 至 3 套最適合且可真實穿在身上的完整穿搭組合。")
+            appendLine("你是專業個人造型師。請僅從以下使用者的衣櫃清單中挑選 2 至 3 套最適合且可真實穿戴在身上的完整穿搭組合（可搭配服裝、外套、鞋履及帽子/眼鏡/包袋/飾品等配件）。")
             appendLine("【目標風格／情境】：$stylePreset")
+            if (personalProfile != null && personalProfile.isConfigured) {
+                appendLine("【使用者個人色彩與身形檔案（請優先挑選襯膚色與修飾比例的單品）】：")
+                if (personalProfile.personalColorSeason.isNotBlank()) {
+                    appendLine("- 四季個人色彩：${personalProfile.personalColorSeason}（推薦色系：${personalProfile.recommendedColors}；避雷色系：${personalProfile.avoidColors}）")
+                }
+                if (personalProfile.bodyShape.isNotBlank()) {
+                    appendLine("- 身形輪廓：${personalProfile.bodyShape}（修飾建議：${personalProfile.fitAdvice}）")
+                }
+            }
             if (anchorItemId != null) {
                 val anchor = wardrobe.find { it.id == anchorItemId }
                 if (anchor != null) {
@@ -330,9 +502,9 @@ class GeminiWardrobeService {
                 appendLine("【使用者補充需求】：$customRequest")
             }
             appendLine("規則：")
-            appendLine("1. 每套必須挑選衣櫃中實際存在的 itemIds（例如：上衣+下著，或連身+外套，可視現有庫存搭配外套或鞋履）。")
+            appendLine("1. 每套必須挑選衣櫃中實際存在的 itemIds（例如：上衣+下著，或連身+外套，並鼓勵適度搭配帽子圍巾、眼鏡、包袋、鞋履或飾品配件）。")
             appendLine("2. itemIds 不可包含重複 ID，且不可虛構清單外的 ID。")
-            appendLine("3. rationale 請以簡潔有感的繁體中文說明為何這樣搭配（限 45 字內）。")
+            appendLine("3. rationale 請以簡潔有感的繁體中文說明為何這樣搭配（結合個人色彩或身形修飾亮點，限 55 字內）。")
             appendLine("【衣櫃 JSON 清單】：")
             append(gson.toJson(compactCatalog))
         }
@@ -370,7 +542,7 @@ class GeminiWardrobeService {
                 })
             })
             add("generationConfig", JsonObject().apply {
-                addProperty("temperature", 0.5)
+                addProperty("temperature", 0.55)
                 addProperty("responseMimeType", "application/json")
                 add("responseSchema", schema)
             })
@@ -381,6 +553,7 @@ class GeminiWardrobeService {
             modelId = modelId,
             payload = payload
         )
+        val usage = parseUsageMetrics(rawResponse, generatedImages = 0)
         val jsonText = extractFirstTextPart(rawResponse)
         val dto = gson.fromJson(jsonText, OutfitResponseDto::class.java)
         val validIds = wardrobe.map { it.id }.toSet()
@@ -391,23 +564,159 @@ class GeminiWardrobeService {
             else rec.copy(itemIds = filteredIds)
         }
         require(cleaned.isNotEmpty()) { "無法從目前衣櫃單品組成符合條件的推薦，請試著多匯入幾件上下著或調整條件" }
-        cleaned
+        GeminiTrackedResult(data = cleaned, usage = usage)
     }
 
     /**
-     * Stage 2 Photorealistic Virtual Try-On: Sends the user's base full-body photo FIRST,
-     * followed by garment reference images and the strict realism prompt.
+     * Online Mall Outfit Recommendation (UNIQLO / GU / MUJI) — Pure Mall or Hybrid Mix with user's wardrobe.
+     */
+    suspend fun recommendMallOutfits(
+        apiKey: String,
+        modelId: String,
+        mallCatalog: List<MallBrandItem>,
+        wardrobe: List<ClothingItem>,
+        mixWithWardrobe: Boolean,
+        stylePreset: String,
+        personalProfile: PersonalStyleProfile?
+    ): GeminiTrackedResult<List<MallOutfitRecommendation>> = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) {
+            throw GeminiApiException(null, null, "請先於右上角設定頁輸入 Gemini API Key")
+        }
+        require(mallCatalog.isNotEmpty()) { "所選品牌目前無符合的常青單品" }
+
+        val mallJson = JsonArray().apply {
+            mallCatalog.forEach { m ->
+                add(JsonObject().apply {
+                    addProperty("id", m.id)
+                    addProperty("brand", m.brand)
+                    addProperty("name", m.name)
+                    addProperty("category", m.category)
+                    addProperty("color", m.color)
+                    addProperty("fit", m.fit)
+                    addProperty("material", m.material)
+                })
+            }
+        }
+
+        val wardrobeJson = JsonArray().apply {
+            if (mixWithWardrobe) {
+                wardrobe.forEach { w ->
+                    add(JsonObject().apply {
+                        addProperty("id", w.id)
+                        addProperty("category", w.category)
+                        addProperty("subCategory", w.subCategory)
+                        addProperty("color", w.color)
+                        addProperty("fit", w.fit)
+                    })
+                }
+            }
+        }
+
+        val promptBuilder = StringBuilder().apply {
+            appendLine("你是精通 UNIQLO、GU、無印良品 MUJI 的日系與現代穿搭顧問。")
+            appendLine("【目標風格】：$stylePreset")
+            appendLine("【搭配模式】：${if (mixWithWardrobe && wardrobe.isNotEmpty()) "商城新品 + 使用者現有衣櫃混搭（一衣多搭購衣建議）" else "全套品牌商城單品搭配"}")
+            if (personalProfile != null && personalProfile.isConfigured) {
+                appendLine("【使用者個人色彩與身形檔案】：")
+                if (personalProfile.personalColorSeason.isNotBlank()) {
+                    appendLine("- 個人色彩季型：${personalProfile.personalColorSeason}（推薦色系：${personalProfile.recommendedColors}）")
+                }
+                if (personalProfile.bodyShape.isNotBlank()) {
+                    appendLine("- 身形輪廓：${personalProfile.bodyShape}（修飾建議：${personalProfile.fitAdvice}）")
+                }
+            }
+            appendLine("請規劃 2 至 3 套高實穿度的穿搭提案：")
+            appendLine("1. mallItemIds 必須從下方【商城單品清單】挑選 1 至 3 件（填寫字串 ID 如 UQ-01、GU-01、MJ-01）。")
+            if (mixWithWardrobe && wardrobe.isNotEmpty()) {
+                appendLine("2. wardrobeItemIds 請從下方【使用者衣櫃清單】挑選 1 至 2 件可與商城新品完美互搭的現有單品 ID。")
+                appendLine("【使用者衣櫃清單】：${gson.toJson(wardrobeJson)}")
+            } else {
+                appendLine("2. wardrobeItemIds 請回傳空陣列 []。")
+            }
+            appendLine("3. rationale 請以繁體中文說明選品色彩、材質版型與個人身形/膚色的搭配理由（55字內）。")
+            appendLine("【商城單品清單】：${gson.toJson(mallJson)}")
+        }
+
+        val schema = JsonObject().apply {
+            addProperty("type", "OBJECT")
+            add("properties", JsonObject().apply {
+                add("outfits", JsonObject().apply {
+                    addProperty("type", "ARRAY")
+                    add("items", JsonObject().apply {
+                        addProperty("type", "OBJECT")
+                        add("properties", JsonObject().apply {
+                            add("title", JsonObject().apply { addProperty("type", "STRING") })
+                            add("rationale", JsonObject().apply { addProperty("type", "STRING") })
+                            add("mallItemIds", JsonObject().apply {
+                                addProperty("type", "ARRAY")
+                                add("items", JsonObject().apply { addProperty("type", "STRING") })
+                            })
+                            add("wardrobeItemIds", JsonObject().apply {
+                                addProperty("type", "ARRAY")
+                                add("items", JsonObject().apply { addProperty("type", "INTEGER") })
+                            })
+                        })
+                        add("required", JsonArray().apply {
+                            add("title"); add("rationale"); add("mallItemIds"); add("wardrobeItemIds")
+                        })
+                    })
+                })
+            })
+            add("required", JsonArray().apply { add("outfits") })
+        }
+
+        val payload = JsonObject().apply {
+            add("contents", JsonArray().apply {
+                add(JsonObject().apply {
+                    add("parts", JsonArray().apply {
+                        add(JsonObject().apply { addProperty("text", promptBuilder.toString()) })
+                    })
+                })
+            })
+            add("generationConfig", JsonObject().apply {
+                addProperty("temperature", 0.5)
+                addProperty("responseMimeType", "application/json")
+                add("responseSchema", schema)
+            })
+        }
+
+        val rawResponse = executeGenerateContent(apiKey, modelId, payload)
+        val usage = parseUsageMetrics(rawResponse, generatedImages = 0)
+        val jsonText = extractFirstTextPart(rawResponse)
+        val dto = gson.fromJson(jsonText, MallOutfitResponseDto::class.java)
+        val validMallIds = mallCatalog.map { it.id }.toSet()
+        val validWardrobeIds = wardrobe.map { it.id }.toSet()
+
+        val cleaned = dto?.outfits.orEmpty().mapNotNull { rec ->
+            val mIds = rec.mallItemIds.filter { it in validMallIds }.distinct()
+            val wIds = rec.wardrobeItemIds.filter { it in validWardrobeIds }.distinct()
+            if (mIds.isEmpty()) null
+            else rec.copy(mallItemIds = mIds, wardrobeItemIds = wIds)
+        }
+        require(cleaned.isNotEmpty()) { "無法產生商城推薦組合，請調整品牌篩選後重試" }
+        GeminiTrackedResult(data = cleaned, usage = usage)
+    }
+
+    /**
+     * Stage 2 Photorealistic Virtual Try-On:
+     * Sends the user's base full-body photo FIRST, followed by garment/accessory reference images,
+     * optional Mall text specifications, and explicit tuck-in / outerwear open-closed directives.
      */
     suspend fun generateVirtualTryOn(
         apiKey: String,
         modelId: String,
         personBitmap: Bitmap,
-        clothingItems: List<Pair<ClothingItem, Bitmap>>
-    ): Bitmap = withContext(Dispatchers.IO) {
+        clothingItems: List<Pair<ClothingItem, Bitmap>>,
+        topStylingMode: TopStylingMode = TopStylingMode.AUTO,
+        outerStylingMode: OuterStylingMode = OuterStylingMode.AUTO,
+        mallSpecs: List<MallBrandItem> = emptyList()
+    ): GeminiTrackedResult<Bitmap> = withContext(Dispatchers.IO) {
         if (apiKey.isBlank()) {
             throw GeminiApiException(null, null, "請先於右上角設定頁輸入 Gemini API Key")
         }
-        require(clothingItems.isNotEmpty()) { "請至少選擇一件衣物進行實穿合成" }
+        require(clothingItems.isNotEmpty() || mallSpecs.isNotEmpty()) {
+            "請至少選擇一件衣櫃單品或商城推薦單品進行實穿合成"
+        }
 
         val personBase64 = bitmapToBase64(
             resizeIfNeeded(personBitmap, maxEdge = 1280),
@@ -440,7 +749,15 @@ class GeminiWardrobeService {
             }
 
             add(JsonObject().apply {
-                addProperty("text", VIRTUAL_TRY_ON_PROMPT)
+                addProperty(
+                    "text",
+                    buildEnhancedTryOnPrompt(
+                        clothingItems = clothingItems.map { it.first },
+                        topStylingMode = topStylingMode,
+                        outerStylingMode = outerStylingMode,
+                        mallSpecs = mallSpecs
+                    )
+                )
             })
         }
 
@@ -464,7 +781,77 @@ class GeminiWardrobeService {
             }
         }
 
-        extractGeneratedBitmap(responseJson)
+        val generatedBitmap = extractGeneratedBitmap(responseJson)
+        val usage = parseUsageMetrics(responseJson, generatedImages = 1)
+        GeminiTrackedResult(data = generatedBitmap, usage = usage)
+    }
+
+    private fun buildEnhancedTryOnPrompt(
+        clothingItems: List<ClothingItem>,
+        topStylingMode: TopStylingMode,
+        outerStylingMode: OuterStylingMode,
+        mallSpecs: List<MallBrandItem>
+    ): String {
+        val sb = StringBuilder()
+        sb.append(VIRTUAL_TRY_ON_PROMPT)
+
+        if (clothingItems.isNotEmpty()) {
+            sb.append("\n\nREFERENCE GARMENTS & ACCESSORIES PLACEMENT RULES:")
+            clothingItems.forEachIndexed { index, item ->
+                val refIndex = index + 2
+                val placementHint = categoryPlacementDirective(item.category)
+                sb.append("\n- Reference Image #$refIndex (${item.category}: ${item.color} ${item.subCategory}, fit=${item.fit}): $placementHint")
+            }
+        }
+
+        if (mallSpecs.isNotEmpty()) {
+            sb.append("\n\nADDITIONAL CATALOG GARMENTS TO RENDER ON THE PERSON:")
+            mallSpecs.forEach { mall ->
+                val placementHint = categoryPlacementDirective(mall.category)
+                sb.append("\n- ${mall.toVirtualTryOnSpecification()} -> $placementHint")
+            }
+        }
+
+        val hasTop = clothingItems.any { it.category == ClothingItem.CAT_TOP } ||
+            mallSpecs.any { it.category == ClothingItem.CAT_TOP }
+        val hasOuter = clothingItems.any { it.category == ClothingItem.CAT_OUTER } ||
+            mallSpecs.any { it.category == ClothingItem.CAT_OUTER }
+
+        if (hasTop && topStylingMode != TopStylingMode.AUTO) {
+            sb.append("\n\nEXPLICIT TOP STYLING CONSTRAINT: ${topStylingMode.promptDirective}.")
+        }
+        if (hasOuter && outerStylingMode != OuterStylingMode.AUTO) {
+            sb.append("\n\nEXPLICIT OUTERWEAR STYLING CONSTRAINT: ${outerStylingMode.promptDirective}.")
+        }
+
+        return sb.toString()
+    }
+
+    private fun categoryPlacementDirective(category: String): String = when (category) {
+        ClothingItem.CAT_TOP -> "Wear on upper torso with realistic shoulder seams and natural sleeve drape."
+        ClothingItem.CAT_BOTTOM -> "Wear on lower body from waist down with accurate leg silhouette and hem length."
+        ClothingItem.CAT_OUTER -> "Layer naturally as outerwear over the inner top."
+        ClothingItem.CAT_ONE_PIECE -> "Wear as a full one-piece dress/jumpsuit fitting the torso and legs naturally."
+        ClothingItem.CAT_SHOES -> "Wear on both feet matching the floor perspective, foot angle, and ground contact shadow."
+        ClothingItem.CAT_HAT_SCARF -> "Wear hats naturally on the head preserving face and hairstyle, or drape scarves around the neck."
+        ClothingItem.CAT_EYEWEAR -> "Wear eyeglasses/sunglasses properly aligned on the nose bridge and ears over the face without distorting facial identity."
+        ClothingItem.CAT_HAIR_ACCESSORY -> "Clip or wear the hair accessory naturally in the hair."
+        ClothingItem.CAT_BAG -> "Carry naturally on the shoulder, crossbody, or in hand matching arm posture."
+        ClothingItem.CAT_ACCESSORY -> "Wear watches/jewelry/belts/socks on their anatomically correct body position."
+        else -> "Wear naturally on the appropriate body part."
+    }
+
+    private fun parseUsageMetrics(responseJson: JsonObject, generatedImages: Int): UsageMetrics {
+        val usageObj = responseJson.getAsJsonObject("usageMetadata")
+        val promptTokens = usageObj?.get("promptTokenCount")?.asInt ?: 0
+        val candidateTokens = usageObj?.get("candidatesTokenCount")?.asInt ?: 0
+        val totalTokens = usageObj?.get("totalTokenCount")?.asInt ?: (promptTokens + candidateTokens)
+        return UsageMetrics(
+            promptTokens = promptTokens,
+            candidateTokens = candidateTokens,
+            totalTokens = totalTokens,
+            generatedImages = generatedImages
+        )
     }
 
     private fun buildTryOnPayload(parts: JsonArray, modalities: List<String>): JsonObject {

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Golden-Ratio Tailor Drape Arc in Terracotta (#C86D51) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#C86D51"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:pathData="M34,63 C42,73 66,73 74,63" />
+
+    <!-- Secondary Tailor Proportion Curve -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#66C86D51"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:pathData="M39,68 C47,75 61,75 69,68" />
+
+    <!-- Geometric Hanger Hook & Shoulders in Charcoal Black (#1C1B1F) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1C1B1F"
+        android:strokeWidth="3.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M49.5,35.5 C49.5,32.2 52.1,29.8 55.2,30.2 C58.1,30.6 59.8,33.4 58.6,36.2 C57.7,38.1 54,40.0 54,42.5 L54,44.2 M54,44.2 L30.5,58.0 C28.5,59.2 29.3,62.2 31.7,62.2 L76.3,62.2 C78.7,62.2 79.5,59.2 77.5,58.0 L54,44.2 Z" />
+
+    <!-- Top-Right AI 4-Point Sparkle Star (✦) in Terracotta (#C86D51) -->
+    <path
+        android:fillColor="#C86D51"
+        android:pathData="M73,27 C73,32.2 74.8,34 80,34 C74.8,34 73,35.8 73,41 C73,35.8 71.2,34 66,34 C71.2,34 73,32.2 73,27 Z" />
+
+    <!-- Secondary Micro Sparkle -->
+    <path
+        android:fillColor="#1C1B1F"
+        android:pathData="M65,24 C65,26.1 65.9,27 68,27 C65.9,27 65,27.9 65,30 C65,27.9 64.1,27 62,27 C64.1,27 65,26.1 65,24 Z" />
+</vector>

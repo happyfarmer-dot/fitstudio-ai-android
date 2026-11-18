@@ -27,12 +27,21 @@ interface WardrobeDao {
     @Update
     suspend fun updateClothing(item: ClothingItem)
 
+    @Query("UPDATE clothing_items SET wearCount = wearCount + 1, lastWornTimestamp = :wornAt WHERE id IN (:ids)")
+    suspend fun incrementWearCountForIds(ids: List<Long>, wornAt: Long)
+
     @Delete
     suspend fun deleteClothing(item: ClothingItem)
+
+    @Query("DELETE FROM clothing_items")
+    suspend fun deleteAllClothing()
 
     // --- Base Full-Body Person Photos ---
     @Query("SELECT * FROM person_photos ORDER BY createdAt DESC")
     fun observeAllPersonPhotos(): Flow<List<PersonPhoto>>
+
+    @Query("SELECT * FROM person_photos ORDER BY createdAt DESC")
+    suspend fun getAllPersonPhotosSnapshot(): List<PersonPhoto>
 
     @Query("SELECT * FROM person_photos WHERE id = :id LIMIT 1")
     suspend fun getPersonPhotoById(id: Long): PersonPhoto?
@@ -45,6 +54,9 @@ interface WardrobeDao {
 
     @Delete
     suspend fun deletePersonPhoto(photo: PersonPhoto)
+
+    @Query("DELETE FROM person_photos")
+    suspend fun deleteAllPersonPhotos()
 
     // --- Virtual Try-On Cache ---
     @Query("SELECT * FROM try_on_cache WHERE cacheKey = :cacheKey LIMIT 1")
@@ -64,4 +76,17 @@ interface WardrobeDao {
 
     @Delete
     suspend fun deleteTryOnCache(entry: TryOnCache)
+
+    @Query("DELETE FROM try_on_cache")
+    suspend fun deleteAllTryOnCaches()
+
+    // --- API Usage Records ---
+    @Query("SELECT * FROM api_usage_records ORDER BY timestamp DESC")
+    fun observeAllApiUsage(): Flow<List<ApiUsageRecord>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertApiUsage(record: ApiUsageRecord): Long
+
+    @Query("DELETE FROM api_usage_records")
+    suspend fun clearAllApiUsage()
 }

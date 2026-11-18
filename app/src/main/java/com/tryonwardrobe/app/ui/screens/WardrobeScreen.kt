@@ -3,6 +3,8 @@ package com.tryonwardrobe.app.ui.screens
 import android.Manifest
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -33,15 +35,20 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Circle
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CameraAlt
+import androidx.compose.material.icons.rounded.Casino
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Checkroom
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Sort
 import androidx.compose.material.icons.rounded.Style
 import androidx.compose.material.icons.rounded.WarningAmber
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -75,28 +82,43 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
 import com.tryonwardrobe.app.data.local.ClothingItem
+import com.tryonwardrobe.app.service.ai.GeminiWardrobeService
+import com.tryonwardrobe.app.ui.WardrobeSortOption
 import com.tryonwardrobe.app.ui.WardrobeUiState
 import java.io.File
 
-private val CATEGORY_FILTERS = listOf("全部", "上衣", "下著", "外套", "連身", "鞋履")
+private val CATEGORY_FILTERS = listOf("全部") + ClothingItem.ALL_CATEGORIES
 
 @Composable
 fun WardrobeScreen(
     uiState: WardrobeUiState,
     onSelectCategoryFilter: (String) -> Unit,
+    onSelectSortOption: (WardrobeSortOption) -> Unit,
     onToggleItemSelection: (Long) -> Unit,
     onClearSelection: () -> Unit,
     onImportUris: (List<Uri>) -> Unit,
     onDeleteItem: (ClothingItem) -> Unit,
+    onIncrementWearCount: (ClothingItem) -> Unit,
     onRetryTagging: (ClothingItem) -> Unit,
     onRetryAllFailedTagging: () -> Unit,
     onStyleWithAnchor: (ClothingItem) -> Unit,
+    onDrawBlindBox: () -> Unit,
+    onApplyBlindBox: (GeminiWardrobeService.OutfitRecommendation) -> Unit,
+    onDismissBlindBox: () -> Unit,
     onStartTryOn: () -> Unit,
     onShowMessage: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+
+    val maxPickLimit = remember {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            minOf(MediaStore.getPickImagesMaxLimit(), 30).coerceAtLeast(2)
+        } else {
+            30
+        }
+    }
 
     val takePictureLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicture()
@@ -136,7 +158,7 @@ fun WardrobeScreen(
     }
 
     val batchGalleryLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = 5)
+        contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = maxPickLimit)
     ) { uris ->
         if (uris.isNotEmpty()) {
             onImportUris(uris)
@@ -159,35 +181,54 @@ fun WardrobeScreen(
         uiState.clothingItems.count { it.tagStatus == ClothingItem.TAG_STATUS_FAILED }
     }
 
-    val displayedItems = remember(uiState.clothingItems, uiState.selectedCategoryFilter) {
-        if (uiState.selectedCategoryFilter == "全部") {
+    val displayedItems = remember(
+        uiState.clothingItems,
+        uiState.selectedCategoryFilter,
+        uiState.selectedSortOption
+    ) {
+        val categoryFiltered = if (uiState.selectedCategoryFilter == "全部") {
             uiState.clothingItems
         } else {
             uiState.clothingItems.filter { it.category == uiState.selectedCategoryFilter }
         }
+        val nowMs = System.currentTimeMillis()
+        when (uiState.selectedSortOption) {
+            WardrobeSortOption.NEWEST -> categoryFiltered.sortedByDescending { it.createdAt }
+            WardrobeSortOption.MOST_WORN -> categoryFiltered.sortedWith(
+                compareByDescending<ClothingItem> { it.wearCount }.thenByDescending { it.createdAt }
+            )
+            WardrobeSortOption.DORMANT_90_DAYS -> categoryFiltered
+                .filter { it.isDormantOver90Days(nowMs) }
+                .sortedBy { it.lastWornTimestamp ?: it.createdAt }
+        }
+    }
+
+    val wardrobeById = remember(uiState.clothingItems) {
+        uiState.clothingItems.associateBy { it.id }
     }
 
     Box(modifier = modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Top Import Toolbar
+            // Top Import Toolbar + Blind Box Random Outfit Button
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 FilledTonalButton(
                     onClick = ::onShootGarmentClick,
                     enabled = !uiState.isImportingGarments,
-                    modifier = Modifier.weight(1f)
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                    modifier = Modifier.weight(0.95f)
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.CameraAlt,
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(16.dp)
                     )
-                    Spacer(Modifier.width(6.dp))
-                    Text("拍攝單品入庫")
+                    Spacer(Modifier.width(4.dp))
+                    Text("拍攝入庫", style = MaterialTheme.typography.labelLarge)
                 }
 
                 Button(
@@ -197,19 +238,34 @@ fun WardrobeScreen(
                         )
                     },
                     enabled = !uiState.isImportingGarments,
-                    modifier = Modifier.weight(1f)
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                    modifier = Modifier.weight(1.35f)
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.PhotoLibrary,
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(16.dp)
                     )
-                    Spacer(Modifier.width(6.dp))
-                    Text("相簿匯入 (最多5件)")
+                    Spacer(Modifier.width(4.dp))
+                    Text("相簿匯入 (最多30件)", style = MaterialTheme.typography.labelLarge)
+                }
+
+                FilledTonalButton(
+                    onClick = onDrawBlindBox,
+                    enabled = uiState.clothingItems.isNotEmpty(),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Casino,
+                        contentDescription = "隨機穿搭",
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text("🎲 隨機", style = MaterialTheme.typography.labelLarge)
                 }
             }
 
-            // Stage 1 Local Storage & Segmentation Progress
+            // Stage 1 Queue Progress Bar (Semaphore(3) + 300ms Tagging Queue)
             AnimatedVisibility(visible = uiState.isImportingGarments) {
                 Surface(
                     color = MaterialTheme.colorScheme.secondaryContainer,
@@ -222,13 +278,113 @@ fun WardrobeScreen(
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
+                        val total = uiState.importProgressTotal.coerceAtLeast(1)
+                        val cur = uiState.importProgressCurrent.coerceIn(0, total)
                         Text(
-                            text = uiState.importStatusText.ifBlank { "本機安全壓縮與端側去背進行中..." },
+                            text = uiState.importStatusText.ifBlank {
+                                "正在處理匯入單品 $cur / $total..."
+                            },
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.onSecondaryContainer,
                             fontWeight = FontWeight.SemiBold
                         )
-                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        LinearProgressIndicator(
+                            progress = { cur.toFloat() / total.toFloat() },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            }
+
+            // Blind Box Random Outfit Drawer Card
+            AnimatedVisibility(visible = uiState.randomBlindBoxRecommendation != null) {
+                uiState.randomBlindBoxRecommendation?.let { blindRec ->
+                    val items = blindRec.itemIds.mapNotNull { wardrobeById[it] }
+                    Card(
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f)
+                        ),
+                        border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.secondary),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = blindRec.title,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(
+                                    onClick = onDismissBlindBox,
+                                    modifier = Modifier.size(24.dp)
+                                ) {
+                                    Icon(Icons.Rounded.Close, contentDescription = "關閉", modifier = Modifier.size(16.dp))
+                                }
+                            }
+                            Text(
+                                text = blindRec.rationale,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                items(items, key = { "blind_wardrobe_${it.id}" }) { garment ->
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = MaterialTheme.colorScheme.surface
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        ) {
+                                            AsyncImage(
+                                                model = File(garment.imagePath),
+                                                contentDescription = garment.subCategory,
+                                                contentScale = ContentScale.Fit,
+                                                modifier = Modifier.size(32.dp)
+                                            )
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(
+                                                text = garment.subCategory,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                maxLines = 1
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = onDrawBlindBox,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("🔄 再抽一套")
+                                }
+                                Button(
+                                    onClick = { onApplyBlindBox(blindRec) },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = MaterialTheme.colorScheme.secondary,
+                                        contentColor = Color.White
+                                    ),
+                                    modifier = Modifier.weight(1.3f)
+                                ) {
+                                    Text("✨ 一鍵套用寫實試穿")
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -243,7 +399,7 @@ fun WardrobeScreen(
                         .padding(horizontal = 16.dp, vertical = 4.dp)
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
@@ -271,16 +427,52 @@ fun WardrobeScreen(
                 }
             }
 
-            // Category Filter Chips
+            // 10-Category Filter Chips LazyRow
             LazyRow(
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 items(CATEGORY_FILTERS) { category ->
                     FilterChip(
                         selected = uiState.selectedCategoryFilter == category,
                         onClick = { onSelectCategoryFilter(category) },
                         label = { Text(category) }
+                    )
+                }
+            }
+
+            // Wear Count & Dormant 90-Day Sort Bar
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                item {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Rounded.Sort,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = "排序：",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                items(WardrobeSortOption.entries) { sortOpt ->
+                    FilterChip(
+                        selected = uiState.selectedSortOption == sortOpt,
+                        onClick = { onSelectSortOption(sortOpt) },
+                        label = {
+                            Text(
+                                text = sortOpt.label,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
                     )
                 }
             }
@@ -310,24 +502,26 @@ fun WardrobeScreen(
                                 modifier = Modifier.size(42.dp)
                             )
                             Text(
-                                text = if (uiState.clothingItems.isEmpty()) {
-                                    "尚無數位衣櫃單品"
-                                } else {
-                                    "此分類目前沒有單品"
+                                text = when {
+                                    uiState.clothingItems.isEmpty() -> "尚無數位衣櫃單品"
+                                    uiState.selectedSortOption == WardrobeSortOption.DORMANT_90_DAYS -> "太棒了！目前沒有超過 90 天未穿的沉睡單品"
+                                    else -> "此分類目前沒有單品"
                                 },
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "拍照或匯入衣物時，會優先安全儲存轉正影像至本機並執行端側 ML Kit 去背，隨後於背景以 ${uiState.taggingModel} 非同步辨識標籤。",
+                                text = "支援 10 大服飾與配件分類、一次最多 30 張批次匯入（Semaphore 防爆佇列），並自動追蹤每件單品的穿著次數。",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            Spacer(Modifier.height(4.dp))
-                            OutlinedButton(onClick = ::onShootGarmentClick) {
-                                Icon(Icons.Rounded.CameraAlt, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text("立刻拍攝第一件衣物")
+                            if (uiState.clothingItems.isEmpty()) {
+                                Spacer(Modifier.height(4.dp))
+                                OutlinedButton(onClick = ::onShootGarmentClick) {
+                                    Icon(Icons.Rounded.CameraAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("立刻拍攝第一件衣物")
+                                }
                             }
                         }
                     }
@@ -338,7 +532,7 @@ fun WardrobeScreen(
                     contentPadding = PaddingValues(
                         start = 16.dp,
                         end = 16.dp,
-                        top = 8.dp,
+                        top = 6.dp,
                         bottom = if (uiState.selectedClothingIds.isNotEmpty()) 104.dp else 24.dp
                     ),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -352,6 +546,7 @@ fun WardrobeScreen(
                             isSelected = isSelected,
                             onToggleSelect = { onToggleItemSelection(item.id) },
                             onDelete = { onDeleteItem(item) },
+                            onIncrementWearCount = { onIncrementWearCount(item) },
                             onRetryTagging = { onRetryTagging(item) },
                             onStyleWithAnchor = { onStyleWithAnchor(item) }
                         )
@@ -386,7 +581,7 @@ fun WardrobeScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "支援上衣、下著、外套與鞋履同時換穿",
+                            text = "支援服飾、鞋履與帽子/眼鏡/包袋同時換穿",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.78f)
                         )
@@ -426,11 +621,15 @@ private fun GarmentCard(
     isSelected: Boolean,
     onToggleSelect: () -> Unit,
     onDelete: () -> Unit,
+    onIncrementWearCount: () -> Unit,
     onRetryTagging: () -> Unit,
     onStyleWithAnchor: () -> Unit
 ) {
     val isPending = item.tagStatus == ClothingItem.TAG_STATUS_PENDING
     val isFailed = item.tagStatus == ClothingItem.TAG_STATUS_FAILED
+    val isDormant = remember(item.lastWornTimestamp, item.createdAt) {
+        item.isDormantOver90Days()
+    }
 
     Card(
         shape = RoundedCornerShape(18.dp),
@@ -532,11 +731,31 @@ private fun GarmentCard(
                         )
                     }
                 }
+
+                // Wear Count Badge Bottom-Right
+                Surface(
+                    color = if (isDormant) {
+                        Color(0xFF795548).copy(alpha = 0.90f)
+                    } else {
+                        MaterialTheme.colorScheme.secondary.copy(alpha = 0.90f)
+                    },
+                    shape = RoundedCornerShape(999.dp),
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(8.dp)
+                ) {
+                    Text(
+                        text = if (isDormant) "90天+未穿 · ${item.wearCount}次" else "穿過 ${item.wearCount} 次",
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                    )
+                }
             }
 
             Column(
                 modifier = Modifier.padding(10.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
+                verticalArrangement = Arrangement.spacedBy(5.dp)
             ) {
                 Text(
                     text = item.subCategory,
@@ -588,7 +807,7 @@ private fun GarmentCard(
 
                     isPending -> {
                         Text(
-                            text = "影像已存妥，背景同步標籤中...",
+                            text = "影像已存妥，佇列同步標籤中...",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.secondary,
                             maxLines = 1,
@@ -626,40 +845,73 @@ private fun GarmentCard(
                     }
                 }
 
-                Spacer(Modifier.height(2.dp))
-
-                Surface(
-                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f),
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(
-                            0.5.dp,
-                            MaterialTheme.colorScheme.secondary.copy(alpha = 0.3f),
-                            RoundedCornerShape(8.dp)
-                        )
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable(onClick = onStyleWithAnchor)
+                // Bottom Action Buttons: "+1 今日穿著" & "AI 配一套"
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.75f),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier
+                            .weight(0.9f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable(onClick = onIncrementWearCount)
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Style,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.secondary,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(Modifier.width(4.dp))
-                        Text(
-                            text = "用這件讓 AI 配一套",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1
-                        )
+                        Row(
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Add,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Spacer(Modifier.width(2.dp))
+                            Text(
+                                text = "1 今日穿著",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1
+                            )
+                        }
+                    }
+
+                    Surface(
+                        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier
+                            .weight(1.1f)
+                            .border(
+                                0.5.dp,
+                                MaterialTheme.colorScheme.secondary.copy(alpha = 0.3f),
+                                RoundedCornerShape(8.dp)
+                            )
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable(onClick = onStyleWithAnchor)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Style,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.secondary,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Spacer(Modifier.width(3.dp))
+                            Text(
+                                text = "AI 配一套",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1
+                            )
+                        }
                     }
                 }
             }

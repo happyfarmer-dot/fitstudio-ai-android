@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import com.tryonwardrobe.app.data.local.ApiUsageRecord
 import com.tryonwardrobe.app.data.local.ClothingItem
 import com.tryonwardrobe.app.data.local.PersonPhoto
 import com.tryonwardrobe.app.data.local.SafeImageStorage
@@ -20,6 +21,18 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.security.MessageDigest
 
+enum class TopStylingMode(val label: String, val promptDirective: String) {
+    AUTO("AI 自動", "Natural styling appropriate for the top and bottom"),
+    TUCK_IN("紮進褲頭 (Tuck-in)", "STRICT TUCK-IN: The top hem must be neatly tucked inside the waistband of the bottom garment, clearly exposing the waist and beltline"),
+    UNTUCKED("自然垂放 (Untucked)", "STRICT UNTUCKED: The top hem must hang naturally and loosely outside over the waistband of the bottom garment")
+}
+
+enum class OuterStylingMode(val label: String, val promptDirective: String) {
+    AUTO("AI 自動", "Natural outerwear layering"),
+    OPEN("敞開內搭 (Open)", "STRICT OPEN FRONT: The outerwear/jacket/coat must be worn completely open in the front, clearly showcasing the inner top beneath"),
+    CLOSED("拉鍊/扣子全扣 (Closed)", "STRICT CLOSED FRONT: The outerwear/jacket/coat must be fully buttoned up or zipped closed in the front")
+}
+
 class WardrobeRepository(
     private val context: Context,
     private val dao: WardrobeDao,
@@ -30,10 +43,18 @@ class WardrobeRepository(
     val allClothingFlow: Flow<List<ClothingItem>> = dao.observeAllClothing()
     val allPersonPhotosFlow: Flow<List<PersonPhoto>> = dao.observeAllPersonPhotos()
     val recentTryOnCachesFlow: Flow<List<TryOnCache>> = dao.observeRecentTryOnCaches()
+    val allApiUsageFlow: Flow<List<ApiUsageRecord>> = dao.observeAllApiUsage()
 
-    fun buildTryOnCacheKey(personPhotoId: Long, clothingIds: List<Long>): String {
+    fun buildTryOnCacheKey(
+        personPhotoId: Long,
+        clothingIds: List<Long>,
+        topMode: TopStylingMode = TopStylingMode.AUTO,
+        outerMode: OuterStylingMode = OuterStylingMode.AUTO,
+        mallItemIds: List<String> = emptyList()
+    ): String {
         val sortedIds = clothingIds.distinct().sorted()
-        val raw = "$personPhotoId:${sortedIds.joinToString(",")}"
+        val sortedMall = mallItemIds.distinct().sorted()
+        val raw = "$personPhotoId:${sortedIds.joinToString(",")}:${topMode.name}:${outerMode.name}:${sortedMall.joinToString(",")}"
         val digest = MessageDigest.getInstance("SHA-256").digest(raw.toByteArray(Charsets.UTF_8))
         return digest.joinToString("") { "%02x".format(it) }
     }
@@ -52,6 +73,13 @@ class WardrobeRepository(
         dao.updateClothing(item)
     }
 
+    suspend fun incrementWearCount(ids: List<Long>, wornAt: Long = System.currentTimeMillis()) =
+        withContext(Dispatchers.IO) {
+            if (ids.isNotEmpty()) {
+                dao.incrementWearCountForIds(ids.distinct(), wornAt)
+            }
+        }
+
     suspend fun deleteClothingItem(item: ClothingItem) = withContext(Dispatchers.IO) {
         dao.deleteClothing(item)
         runCatching { File(item.imagePath).delete() }
@@ -68,6 +96,15 @@ class WardrobeRepository(
 
     suspend fun getAllClothingSnapshot(): List<ClothingItem> = withContext(Dispatchers.IO) {
         dao.getAllClothingSnapshot()
+    }
+
+    suspend fun getAllPersonPhotosSnapshot(): List<PersonPhoto> = withContext(Dispatchers.IO) {
+        dao.getAllPersonPhotosSnapshot()
+    }
+
+    suspend fun insertPersonPhoto(photo: PersonPhoto): PersonPhoto = withContext(Dispatchers.IO) {
+        val newId = dao.insertPersonPhoto(photo)
+        photo.copy(id = newId)
     }
 
     suspend fun insertPersonPhotoAndSetActive(label: String, imagePath: String): PersonPhoto =
@@ -94,27 +131,57 @@ class WardrobeRepository(
         }
     }
 
-    suspend fun findValidTryOnCache(personPhotoId: Long, clothingIds: List<Long>): TryOnCache? =
-        withContext(Dispatchers.IO) {
-            val key = buildTryOnCacheKey(personPhotoId, clothingIds)
-            val cached = dao.getTryOnCacheByKey(key) ?: return@withContext null
-            val resultFile = File(cached.resultImagePath)
-            if (resultFile.exists() && resultFile.length() > 0L) {
-                cached
-            } else {
-                dao.deleteTryOnCache(cached)
-                null
-            }
+    suspend fun clearAllWardrobeAndPersonPhotos() = withContext(Dispatchers.IO) {
+        val allClothes = dao.getAllClothingSnapshot()
+        allClothes.forEach { runCatching { File(it.imagePath).delete() } }
+        val allPersons = dao.getAllPersonPhotosSnapshot()
+        allPersons.forEach { runCatching { File(it.imagePath).delete() } }
+        val allCaches = dao.observeRecentTryOnCaches().first()
+        allCaches.forEach { runCatching { File(it.resultImagePath).delete() } }
+
+        dao.deleteAllTryOnCaches()
+        dao.deleteAllClothing()
+        dao.deleteAllPersonPhotos()
+        settings.setActivePersonPhotoId(null)
+    }
+
+    suspend fun recordApiUsage(record: ApiUsageRecord) = withContext(Dispatchers.IO) {
+        dao.insertApiUsage(record)
+    }
+
+    suspend fun clearAllApiUsage() = withContext(Dispatchers.IO) {
+        dao.clearAllApiUsage()
+    }
+
+    suspend fun findValidTryOnCache(
+        personPhotoId: Long,
+        clothingIds: List<Long>,
+        topMode: TopStylingMode = TopStylingMode.AUTO,
+        outerMode: OuterStylingMode = OuterStylingMode.AUTO,
+        mallItemIds: List<String> = emptyList()
+    ): TryOnCache? = withContext(Dispatchers.IO) {
+        val key = buildTryOnCacheKey(personPhotoId, clothingIds, topMode, outerMode, mallItemIds)
+        val cached = dao.getTryOnCacheByKey(key) ?: return@withContext null
+        val resultFile = File(cached.resultImagePath)
+        if (resultFile.exists() && resultFile.length() > 0L) {
+            cached
+        } else {
+            dao.deleteTryOnCache(cached)
+            null
         }
+    }
 
     suspend fun storeTryOnCache(
         personPhoto: PersonPhoto,
         clothingIds: List<Long>,
+        topMode: TopStylingMode = TopStylingMode.AUTO,
+        outerMode: OuterStylingMode = OuterStylingMode.AUTO,
+        mallItemIds: List<String> = emptyList(),
         resultBitmap: Bitmap,
         modelUsed: String
     ): TryOnCache = withContext(Dispatchers.IO) {
         val sortedIds = clothingIds.distinct().sorted()
-        val cacheKey = buildTryOnCacheKey(personPhoto.id, sortedIds)
+        val cacheKey = buildTryOnCacheKey(personPhoto.id, sortedIds, topMode, outerMode, mallItemIds)
         dao.getTryOnCacheByKey(cacheKey)?.let { previous ->
             runCatching { File(previous.resultImagePath).delete() }
         }

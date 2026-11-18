@@ -1,5 +1,6 @@
 package com.tryonwardrobe.app.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -23,7 +24,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Casino
 import androidx.compose.material.icons.rounded.Checkroom
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Style
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -31,7 +35,9 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -52,11 +58,18 @@ import com.tryonwardrobe.app.service.ai.GeminiWardrobeService
 import com.tryonwardrobe.app.ui.WardrobeUiState
 import java.io.File
 
-private val STYLE_PRESETS = listOf(
+val EXPANDED_STYLE_PRESETS = listOf(
     "日系簡約",
+    "韓系質感",
+    "City Boy 城市機能",
+    "Clean Fit 極簡俐落",
     "商務休閒",
-    "約會穿搭",
     "美式街頭",
+    "美式復古 Ivy",
+    "戶外山系 Gorpcore",
+    "運動休閒",
+    "約會優雅",
+    "度假慵懶",
     "依今日氣溫推薦"
 )
 
@@ -68,6 +81,8 @@ fun AiStylistScreen(
     onUpdateCustomPrompt: (String) -> Unit,
     onSetAnchorItem: (Long?) -> Unit,
     onGenerateRecommendations: () -> Unit,
+    onDrawBlindBox: () -> Unit,
+    onDismissBlindBox: () -> Unit,
     onApplyRecommendation: (GeminiWardrobeService.OutfitRecommendation) -> Unit,
     onGoToWardrobe: () -> Unit,
     modifier: Modifier = Modifier
@@ -87,21 +102,44 @@ fun AiStylistScreen(
                 shape = RoundedCornerShape(14.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Row(
+                Column(
                     modifier = Modifier.padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Style,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.secondary
-                    )
-                    Text(
-                        text = "兩階段低額度管線：僅傳送衣櫃文字標籤 JSON 給 ${uiState.taggingModel} 挑選組合（0 圖片傳輸），確認套用後再以 ${uiState.tryOnModel} 生成全身寫實實穿。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Style,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.secondary
+                        )
+                        Text(
+                            text = "兩階段低額度管線：僅傳送衣櫃文字標籤與個人色彩身形 JSON 給 ${uiState.taggingModel} 挑選組合（0 圖片傳輸），確認套用後再以 ${uiState.tryOnModel} 生成全身寫實實穿。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (uiState.personalProfile.isConfigured) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Palette,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.secondary,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Text(
+                                text = "已啟用個人檔案注入：${uiState.personalProfile.personalColorSeason} · ${uiState.personalProfile.bodyShape}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.secondary,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -139,11 +177,11 @@ fun AiStylistScreen(
                 }
             }
         } else {
-            // Style / Scenario Picker
+            // 1. 12 Expanded Style Presets (FlowRow)
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "1. 選擇風格與穿搭情境",
+                        text = "1. 選擇風格與穿搭情境（12 大風格庫）",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )
@@ -151,7 +189,7 @@ fun AiStylistScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        STYLE_PRESETS.forEach { preset ->
+                        EXPANDED_STYLE_PRESETS.forEach { preset ->
                             FilterChip(
                                 selected = uiState.selectedStylePreset == preset,
                                 onClick = { onSelectStylePreset(preset) },
@@ -162,7 +200,7 @@ fun AiStylistScreen(
                 }
             }
 
-            // Optional Anchor Item Lock
+            // 2. Optional Anchor Item Lock
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
@@ -224,7 +262,7 @@ fun AiStylistScreen(
                 }
             }
 
-            // Custom Prompt Input
+            // 3. Custom Prompt Input
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
@@ -245,30 +283,143 @@ fun AiStylistScreen(
                 }
             }
 
-            // Generate CTA
+            // 4. Generate CTA + Blind Box Random Outfit Button
             item {
-                Button(
-                    onClick = onGenerateRecommendations,
-                    enabled = !uiState.isGeneratingRecommendations,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(50.dp)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    if (uiState.isGeneratingRecommendations) {
-                        CircularProgressIndicator(
-                            color = MaterialTheme.colorScheme.onPrimary,
-                            strokeWidth = 2.5.dp,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        Text("${uiState.taggingModel} 正在挑揀衣櫃組合...")
-                    } else {
-                        Icon(Icons.Rounded.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            text = "產生 AI 智慧穿搭建議",
-                            fontWeight = FontWeight.Bold
-                        )
+                    FilledTonalButton(
+                        onClick = onDrawBlindBox,
+                        enabled = !uiState.isGeneratingRecommendations,
+                        modifier = Modifier
+                            .weight(0.95f)
+                            .height(50.dp)
+                    ) {
+                        Icon(Icons.Rounded.Casino, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("🎲 隨機靈感穿搭", fontWeight = FontWeight.Bold)
+                    }
+
+                    Button(
+                        onClick = onGenerateRecommendations,
+                        enabled = !uiState.isGeneratingRecommendations,
+                        modifier = Modifier
+                            .weight(1.35f)
+                            .height(50.dp)
+                    ) {
+                        if (uiState.isGeneratingRecommendations) {
+                            CircularProgressIndicator(
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                strokeWidth = 2.5.dp,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text("${uiState.taggingModel} 挑選中...")
+                        } else {
+                            Icon(Icons.Rounded.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = "產生 AI 穿搭建議",
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Blind Box Random Outfit Card (if drawn)
+            if (uiState.randomBlindBoxRecommendation != null) {
+                item {
+                    val blindRec = uiState.randomBlindBoxRecommendation
+                    val matchedItems = blindRec.itemIds.mapNotNull { wardrobeById[it] }
+                    Card(
+                        shape = RoundedCornerShape(18.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f)
+                        ),
+                        border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.secondary),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = blindRec.title,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(
+                                    onClick = onDismissBlindBox,
+                                    modifier = Modifier.size(26.dp)
+                                ) {
+                                    Icon(Icons.Rounded.Close, contentDescription = "關閉", modifier = Modifier.size(18.dp))
+                                }
+                            }
+                            Text(
+                                text = blindRec.rationale,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                items(matchedItems, key = { "blind_stylist_${it.id}" }) { item ->
+                                    Column(
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        modifier = Modifier.width(74.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(66.dp)
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .background(MaterialTheme.colorScheme.surface)
+                                                .padding(6.dp)
+                                        ) {
+                                            AsyncImage(
+                                                model = File(item.imagePath),
+                                                contentDescription = item.subCategory,
+                                                contentScale = ContentScale.Fit,
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                        }
+                                        Spacer(Modifier.height(4.dp))
+                                        Text(
+                                            text = item.subCategory,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = onDrawBlindBox,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("🔄 再抽一套")
+                                }
+                                Button(
+                                    onClick = { onApplyRecommendation(blindRec) },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = MaterialTheme.colorScheme.secondary,
+                                        contentColor = Color.White
+                                    ),
+                                    modifier = Modifier.weight(1.35f)
+                                ) {
+                                    Text("✨ 一鍵套用寫實試穿")
+                                }
+                            }
+                        }
                     }
                 }
             }

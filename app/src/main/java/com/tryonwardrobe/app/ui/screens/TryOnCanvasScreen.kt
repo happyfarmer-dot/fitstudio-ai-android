@@ -5,12 +5,15 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -32,15 +35,22 @@ import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Cached
 import androidx.compose.material.icons.rounded.CameraAlt
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.ShoppingBag
+import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -48,6 +58,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -64,21 +75,32 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
+import com.tryonwardrobe.app.data.catalog.MallBrandItem
 import com.tryonwardrobe.app.data.local.ClothingItem
 import com.tryonwardrobe.app.data.local.PersonPhoto
 import com.tryonwardrobe.app.data.local.TryOnCache
+import com.tryonwardrobe.app.data.preferences.SettingsDataStore
+import com.tryonwardrobe.app.data.repository.OuterStylingMode
+import com.tryonwardrobe.app.data.repository.TopStylingMode
 import com.tryonwardrobe.app.ui.WardrobeUiState
 import com.tryonwardrobe.app.ui.components.BeforeAfterSlider
 import java.io.File
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun TryOnCanvasScreen(
     uiState: WardrobeUiState,
     onOpenBaseCameraDialog: () -> Unit,
     onSelectPersonPhoto: (PersonPhoto) -> Unit,
     onDeletePersonPhoto: (PersonPhoto) -> Unit,
+    onAnalyzePersonalProfile: () -> Unit,
+    onUpdateManualPersonalProfile: (colorSeasonId: String, bodyShapeId: String) -> Unit,
     onToggleClothingSelection: (Long) -> Unit,
+    onRemoveSelectedMallItem: (String) -> Unit,
+    onSetTopStylingMode: (TopStylingMode) -> Unit,
+    onSetOuterStylingMode: (OuterStylingMode) -> Unit,
     onRunTryOn: (forceRegenerate: Boolean) -> Unit,
+    onConfirmWearOutfit: () -> Unit,
     onOpenCachedEntry: (TryOnCache) -> Unit,
     onSaveToGallery: () -> Unit,
     onGoToWardrobe: () -> Unit,
@@ -86,6 +108,7 @@ fun TryOnCanvasScreen(
 ) {
     val context = LocalContext.current
     var showWardrobeQuickPicker by remember { mutableStateOf(false) }
+    var showEditProfileDialog by remember { mutableStateOf(false) }
 
     val storagePermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -113,12 +136,22 @@ fun TryOnCanvasScreen(
         uiState.clothingItems.filter { it.id in uiState.selectedClothingIds }
     }
 
+    val hasTopSelected = remember(selectedClothingItems, uiState.selectedMallItemsForTryOn) {
+        selectedClothingItems.any { it.category == ClothingItem.CAT_TOP } ||
+            uiState.selectedMallItemsForTryOn.any { it.category == ClothingItem.CAT_TOP }
+    }
+
+    val hasOuterSelected = remember(selectedClothingItems, uiState.selectedMallItemsForTryOn) {
+        selectedClothingItems.any { it.category == ClothingItem.CAT_OUTER } ||
+            uiState.selectedMallItemsForTryOn.any { it.category == ClothingItem.CAT_OUTER }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         // 1. Multi-Base Full-Body Photo Selector
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -213,7 +246,116 @@ fun TryOnCanvasScreen(
             }
         }
 
-        // 2. Selected Clothing Items Strip + Quick Picker Toggle
+        // 1B. Personal Color (4-Season) & Body Silhouette Card
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Rounded.Palette,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Column {
+                            Text(
+                                text = "個人色彩（四季型人）與身形輪廓檔案",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "此分析為 AI 視覺推論參考（可點擊右側手動修改）",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    TextButton(
+                        onClick = { showEditProfileDialog = true },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("手動修改", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+
+                if (uiState.personalProfile.isConfigured) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(
+                                text = "🎨 ${uiState.personalProfile.personalColorSeason}",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                        Surface(
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(
+                                text = "🧍 ${uiState.personalProfile.bodyShape}",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                    Text(
+                        text = "• 推薦色系：${uiState.personalProfile.recommendedColors}\n• 避雷色系：${uiState.personalProfile.avoidColors}\n• 版型建議：${uiState.personalProfile.fitAdvice}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Text(
+                        text = "尚未建立個人色彩與身形檔案。點擊下方按鈕由 AI 根據目前全身照自動推論，或在右側手動設定，後續穿搭與商城推薦將自動帶入。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                FilledTonalButton(
+                    onClick = onAnalyzePersonalProfile,
+                    enabled = !uiState.isAnalyzingPersonalProfile && uiState.activePersonPhoto != null,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (uiState.isAnalyzingPersonalProfile) {
+                        CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("正在以 ${uiState.taggingModel} 分析全身照色彩與身形...")
+                    } else {
+                        Icon(Icons.Rounded.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("✨ AI 分析個人色彩與身形")
+                    }
+                }
+            }
+        }
+
+        // 2. Selected Clothing Items Strip + Mall Items + Quick Picker Toggle
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(
                 modifier = Modifier
@@ -222,8 +364,9 @@ fun TryOnCanvasScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                val totalSelectedCount = selectedClothingItems.size + uiState.selectedMallItemsForTryOn.size
                 Text(
-                    text = "待試穿單品（已選 ${selectedClothingItems.size} 件）",
+                    text = "待試穿單品（已選 $totalSelectedCount 件）",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold
                 )
@@ -245,21 +388,27 @@ fun TryOnCanvasScreen(
                 )
             }
 
-            if (selectedClothingItems.isNotEmpty()) {
+            if (selectedClothingItems.isNotEmpty() || uiState.selectedMallItemsForTryOn.isNotEmpty()) {
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(selectedClothingItems, key = { it.id }) { item ->
+                    items(selectedClothingItems, key = { "garment_${it.id}" }) { item ->
                         SelectedGarmentChip(
                             item = item,
                             onRemove = { onToggleClothingSelection(item.id) }
                         )
                     }
+                    items(uiState.selectedMallItemsForTryOn, key = { "mall_${it.id}" }) { mallItem ->
+                        SelectedMallItemChip(
+                            mallItem = mallItem,
+                            onRemove = { onRemoveSelectedMallItem(mallItem.id) }
+                        )
+                    }
                 }
             } else {
                 Text(
-                    text = "可單選一件衣物，或同時勾選「上衣 + 下著 + 外套」進行疊穿實穿。",
+                    text = "可單選一件衣物，或同時勾選「上衣 + 下著 + 外套 + 帽子/眼鏡/包袋」進行全身寫實換裝。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 16.dp)
@@ -334,6 +483,84 @@ fun TryOnCanvasScreen(
             }
         }
 
+        // 2B. Explicit Tuck-In & Outerwear Open/Closed Styling Controls
+        AnimatedVisibility(visible = hasTopSelected || hasOuterSelected) {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                ),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Rounded.Tune,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "寫實穿法微調控制（紮衣服 ／ 外套開襟）",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    if (hasTopSelected) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(
+                                text = "上衣穿著方式：",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                TopStylingMode.entries.forEach { mode ->
+                                    FilterChip(
+                                        selected = uiState.topStylingMode == mode,
+                                        onClick = { onSetTopStylingMode(mode) },
+                                        label = { Text(mode.label, style = MaterialTheme.typography.labelSmall) }
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    if (hasOuterSelected) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(
+                                text = "外套穿著方式：",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                OuterStylingMode.entries.forEach { mode ->
+                                    FilterChip(
+                                        selected = uiState.outerStylingMode == mode,
+                                        onClick = { onSetOuterStylingMode(mode) },
+                                        label = { Text(mode.label, style = MaterialTheme.typography.labelSmall) }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // 3. Center Photorealistic Try-On Stage (Before / After Slider)
         Box(
             modifier = Modifier
@@ -371,7 +598,7 @@ fun TryOnCanvasScreen(
                             .padding(14.dp)
                     ) {
                         Text(
-                            text = "選好上方衣物後，點擊「套用寫實實穿」即可預覽換裝",
+                            text = "選好上方衣物與穿法後，點擊「套用寫實實穿」即可預覽換裝",
                             color = Color.White,
                             style = MaterialTheme.typography.labelMedium,
                             modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
@@ -406,7 +633,6 @@ fun TryOnCanvasScreen(
                 }
             }
 
-            // Cache Hit / Active Model Status Pill (top-bottom overlay when result exists)
             if (afterPath != null && !uiState.isGeneratingTryOn) {
                 Surface(
                     color = if (uiState.isResultFromCache) {
@@ -446,7 +672,6 @@ fun TryOnCanvasScreen(
                 }
             }
 
-            // Loading Scrim
             if (uiState.isGeneratingTryOn) {
                 Box(
                     modifier = Modifier
@@ -471,7 +696,7 @@ fun TryOnCanvasScreen(
             }
         }
 
-        // 4. Primary Action Buttons
+        // 4. Primary Action Buttons + "確認採用此穿搭 (穿著次數 +1)"
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -501,26 +726,36 @@ fun TryOnCanvasScreen(
             if (uiState.afterResultPath != null) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     OutlinedButton(
                         onClick = { onRunTryOn(true) },
                         enabled = !uiState.isGeneratingTryOn,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(0.9f)
                     ) {
-                        Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("重新生成")
+                        Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("重新生成", style = MaterialTheme.typography.labelLarge)
+                    }
+
+                    FilledTonalButton(
+                        onClick = onConfirmWearOutfit,
+                        enabled = !uiState.isGeneratingTryOn && selectedClothingItems.isNotEmpty(),
+                        modifier = Modifier.weight(1.1f)
+                    ) {
+                        Icon(Icons.Rounded.CheckCircle, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("確認採用 (+1次)", style = MaterialTheme.typography.labelLarge)
                     }
 
                     FilledTonalButton(
                         onClick = ::triggerSaveToGallery,
                         enabled = !uiState.isGeneratingTryOn,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1.0f)
                     ) {
-                        Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("儲存至相簿")
+                        Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("存至相簿", style = MaterialTheme.typography.labelLarge)
                     }
                 }
             }
@@ -576,6 +811,119 @@ fun TryOnCanvasScreen(
 
         Spacer(Modifier.height(12.dp))
     }
+
+    if (showEditProfileDialog) {
+        ManualPersonalProfileDialog(
+            initialSeason = uiState.personalProfile.personalColorSeason.ifBlank {
+                SettingsDataStore.PERSONAL_COLOR_OPTIONS.first().id
+            },
+            initialBodyShape = uiState.personalProfile.bodyShape.ifBlank {
+                SettingsDataStore.BODY_SHAPE_OPTIONS.first().id
+            },
+            onDismiss = { showEditProfileDialog = false },
+            onSave = { season, shape ->
+                onUpdateManualPersonalProfile(season, shape)
+                showEditProfileDialog = false
+            }
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ManualPersonalProfileDialog(
+    initialSeason: String,
+    initialBodyShape: String,
+    onDismiss: () -> Unit,
+    onSave: (String, String) -> Unit
+) {
+    var selectedSeason by remember(initialSeason) { mutableStateOf(initialSeason) }
+    var selectedShape by remember(initialBodyShape) { mutableStateOf(initialBodyShape) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "設定個人色彩與身形輪廓",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    text = "※ 此設定為 AI 視覺推論參考或個人偏好，將自動注入 AI 穿搭與商城推薦引擎。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Text(
+                    text = "1. 四季型個人色彩",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    SettingsDataStore.PERSONAL_COLOR_OPTIONS.forEach { opt ->
+                        FilterChip(
+                            selected = selectedSeason == opt.id,
+                            onClick = { selectedSeason = opt.id },
+                            label = { Text(opt.id) }
+                        )
+                    }
+                }
+                SettingsDataStore.PERSONAL_COLOR_OPTIONS.find { it.id == selectedSeason }?.let { opt ->
+                    Text(
+                        text = "推薦色：${opt.recommendedColors}\n避雷色：${opt.avoidColors}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Spacer(Modifier.height(4.dp))
+
+                Text(
+                    text = "2. 身形輪廓特徵",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    SettingsDataStore.BODY_SHAPE_OPTIONS.forEach { opt ->
+                        FilterChip(
+                            selected = selectedShape == opt.id,
+                            onClick = { selectedShape = opt.id },
+                            label = { Text(opt.id) }
+                        )
+                    }
+                }
+                SettingsDataStore.BODY_SHAPE_OPTIONS.find { it.id == selectedShape }?.let { opt ->
+                    Text(
+                        text = "版型建議：${opt.fitAdvice}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onSave(selectedSeason, selectedShape) }) {
+                Text("儲存個人檔案")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
 }
 
 @Composable
@@ -699,6 +1047,55 @@ private fun SelectedGarmentChip(
                 Icon(
                     imageVector = Icons.Rounded.Close,
                     contentDescription = "移除此件",
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SelectedMallItemChip(
+    mallItem: MallBrandItem,
+    onRemove: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.75f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.5f))
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(start = 8.dp, end = 4.dp, top = 5.dp, bottom = 5.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.ShoppingBag,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.secondary,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(Modifier.width(6.dp))
+            Column {
+                Text(
+                    text = "[${mallItem.brand}] ${mallItem.name}",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1
+                )
+                Text(
+                    text = "${mallItem.category} · ${mallItem.color}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    maxLines = 1
+                )
+            }
+            IconButton(
+                onClick = onRemove,
+                modifier = Modifier.size(28.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Close,
+                    contentDescription = "移除商城單品",
                     modifier = Modifier.size(16.dp)
                 )
             }
