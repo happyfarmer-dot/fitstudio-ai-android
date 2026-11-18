@@ -1,0 +1,5 @@
+-keepattributes Signature,InnerClasses,EnclosingMethod
+-keep class com.tryonwardrobe.app.service.ai.** { *; }
+-keep class com.tryonwardrobe.app.data.local.** { *; }
+-dontwarn okhttp3.**
+-dontwarn okio.**
