@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.tryonwardrobe.app.WardrobeApplication
 import com.tryonwardrobe.app.data.local.ClothingItem
 import com.tryonwardrobe.app.data.local.PersonPhoto
+import com.tryonwardrobe.app.data.local.SafeImageStorage
 import com.tryonwardrobe.app.data.local.TryOnCache
 import com.tryonwardrobe.app.data.preferences.SettingsDataStore
 import com.tryonwardrobe.app.service.ai.GeminiWardrobeService
@@ -14,6 +15,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -34,9 +36,12 @@ data class WardrobeUiState(
     val recentCaches: List<TryOnCache> = emptyList(),
     val selectedClothingIds: Set<Long> = emptySet(),
     val geminiApiKey: String = "",
-    val tryOnModel: String = SettingsDataStore.MODEL_FLASH_IMAGE,
+    val taggingModel: String = SettingsDataStore.DEFAULT_TAGGING_MODEL,
+    val tryOnModel: String = SettingsDataStore.DEFAULT_TRY_ON_MODEL,
     val isImportingGarments: Boolean = false,
     val importStatusText: String = "",
+    val isTestingConnection: Boolean = false,
+    val connectionTestResult: GeminiWardrobeService.ConnectionTestResult? = null,
     val isGeneratingTryOn: Boolean = false,
     val tryOnStatusText: String = "",
     val beforePhotoPath: String? = null,
@@ -58,6 +63,8 @@ private data class LocalActionState(
     val selectedClothingIds: Set<Long> = emptySet(),
     val isImportingGarments: Boolean = false,
     val importStatusText: String = "",
+    val isTestingConnection: Boolean = false,
+    val connectionTestResult: GeminiWardrobeService.ConnectionTestResult? = null,
     val isGeneratingTryOn: Boolean = false,
     val tryOnStatusText: String = "",
     val beforePhotoPath: String? = null,
@@ -79,13 +86,15 @@ private data class PersistentBundle(
     val activePersonId: Long?,
     val caches: List<TryOnCache>,
     val apiKey: String,
-    val tryOnModel: String
+    val taggingModel: String = SettingsDataStore.DEFAULT_TAGGING_MODEL,
+    val tryOnModel: String = SettingsDataStore.DEFAULT_TRY_ON_MODEL
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val app = application as WardrobeApplication
     private val repository = app.wardrobeRepository
+    private val imageStorage = app.safeImageStorage
     private val backgroundRemover = app.backgroundRemover
     private val geminiService = app.geminiWardrobeService
 
@@ -103,11 +112,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             persons = persons,
             activePersonId = activeId,
             caches = caches,
-            apiKey = apiKey,
-            tryOnModel = SettingsDataStore.MODEL_FLASH_IMAGE
+            apiKey = apiKey
         )
-    }.combine(repository.settings.tryOnModelFlow) { bundle, model ->
-        bundle.copy(tryOnModel = model)
+    }.combine(repository.settings.taggingModelFlow) { bundle, taggingModel ->
+        bundle.copy(taggingModel = taggingModel)
+    }.combine(repository.settings.tryOnModelFlow) { bundle, tryOnModel ->
+        bundle.copy(tryOnModel = tryOnModel)
     }
 
     val uiState: StateFlow<WardrobeUiState> = combine(persistentFlow, localState) { db, local ->
@@ -124,9 +134,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             recentCaches = db.caches,
             selectedClothingIds = cleanedSelected,
             geminiApiKey = db.apiKey,
+            taggingModel = db.taggingModel,
             tryOnModel = db.tryOnModel,
             isImportingGarments = local.isImportingGarments,
             importStatusText = local.importStatusText,
+            isTestingConnection = local.isTestingConnection,
+            connectionTestResult = local.connectionTestResult,
             isGeneratingTryOn = local.isGeneratingTryOn,
             tryOnStatusText = local.tryOnStatusText,
             beforePhotoPath = local.beforePhotoPath ?: activePerson?.imagePath,
@@ -170,7 +183,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setApiKeyDialogVisible(visible: Boolean) {
-        localState.update { it.copy(showApiKeyDialog = visible) }
+        localState.update {
+            it.copy(
+                showApiKeyDialog = visible,
+                connectionTestResult = if (!visible) null else it.connectionTestResult
+            )
+        }
     }
 
     fun setBaseCameraDialogVisible(visible: Boolean) {
@@ -185,14 +203,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         localState.update { it.copy(snackbarMessage = msg) }
     }
 
-    fun saveSettings(apiKey: String, modelId: String) {
+    fun clearConnectionTestResult() {
+        localState.update { it.copy(connectionTestResult = null) }
+    }
+
+    fun testGeminiConnection(
+        apiKey: String,
+        taggingModelId: String,
+        tryOnModelId: String
+    ) {
+        viewModelScope.launch {
+            localState.update {
+                it.copy(isTestingConnection = true, connectionTestResult = null)
+            }
+            val result = geminiService.testConnection(
+                apiKey = apiKey,
+                taggingModelId = taggingModelId,
+                tryOnModelId = tryOnModelId
+            )
+            localState.update {
+                it.copy(
+                    isTestingConnection = false,
+                    connectionTestResult = result
+                )
+            }
+        }
+    }
+
+    fun saveSettings(apiKey: String, taggingModelId: String, tryOnModelId: String) {
         viewModelScope.launch {
             repository.settings.saveGeminiApiKey(apiKey)
-            repository.settings.setTryOnModel(modelId)
+            repository.settings.setTaggingModel(taggingModelId)
+            repository.settings.setTryOnModel(tryOnModelId)
             localState.update {
                 it.copy(
                     showApiKeyDialog = false,
-                    snackbarMessage = "設定已儲存（切換模型：$modelId）"
+                    connectionTestResult = null,
+                    snackbarMessage = "設定已儲存（打標：$taggingModelId ／ 換裝：$tryOnModelId）"
                 )
             }
         }
@@ -226,18 +273,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Offline-first Full-Body Base Photo ingestion from CameraX capture File:
+     * downsamples <= 1280px, fixes EXIF orientation, writes permanently to filesDir/full_body.
+     */
     fun addBasePersonPhotoFromFile(file: File, labelPrefix: String = "全身基準照") {
         viewModelScope.launch {
             runCatching {
-                val bitmap = backgroundRemover.prepareBasePersonPhotoFromFile(file)
+                val bitmap = imageStorage.loadSafeBitmapFromFile(file, SafeImageStorage.MAX_IMAGE_EDGE_PX)
                 val savedPath = repository.savePersonBitmapToInternal(bitmap)
                 val count = uiState.value.personPhotos.size + 1
-                val savedPhoto = repository.insertPersonPhotoAndSetActive(
+                repository.insertPersonPhotoAndSetActive(
                     label = "$labelPrefix #$count",
                     imagePath = savedPath
                 )
+            }.also {
                 runCatching { file.delete() }
-                savedPhoto
             }.onSuccess { savedPhoto ->
                 localState.update {
                     it.copy(
@@ -245,7 +296,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         beforePhotoPath = savedPhoto.imagePath,
                         afterResultPath = null,
                         isResultFromCache = false,
-                        snackbarMessage = "已儲存並套用「${savedPhoto.label}」"
+                        snackbarMessage = "已離線儲存並套用「${savedPhoto.label}」"
                     )
                 }
             }.onFailure { err ->
@@ -256,10 +307,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Offline-first Full-Body Base Photo ingestion from Photo Picker / Gallery Uri:
+     * copies content:// stream into app filesDir/full_body immediately to prevent URI expiry SecurityException.
+     */
     fun addBasePersonPhotoFromUri(uri: Uri, labelPrefix: String = "相簿全身照") {
         viewModelScope.launch {
             runCatching {
-                val bitmap = backgroundRemover.prepareBasePersonPhoto(uri)
+                val bitmap = imageStorage.loadSafeBitmapFromUri(uri, SafeImageStorage.MAX_IMAGE_EDGE_PX)
                 val savedPath = repository.savePersonBitmapToInternal(bitmap)
                 val count = uiState.value.personPhotos.size + 1
                 repository.insertPersonPhotoAndSetActive(
@@ -273,7 +328,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         beforePhotoPath = savedPhoto.imagePath,
                         afterResultPath = null,
                         isResultFromCache = false,
-                        snackbarMessage = "已儲存並套用「${savedPhoto.label}」"
+                        snackbarMessage = "已離線儲存並套用「${savedPhoto.label}」"
                     )
                 }
             }.onFailure { err ->
@@ -285,61 +340,75 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Pipeline:
-     * 1. On-device ML Kit Subject Segmentation (free background removal)
-     * 2. Gemini 2.5 Flash Structured JSON Auto-Tagging (single lightweight inference)
-     * 3. Save transparent PNG cutout & metadata into Room DB
+     * Two-Stage Decoupled Wardrobe Upload Pipeline:
+     * Step 1 (Local immediate save): Sanitize URI via SafeImageStorage (<= 1280px + EXIF),
+     * run offline ML Kit background removal with runCatching fallback, write permanent file
+     * to filesDir/wardrobe, and immediately insert ClothingItem into Room so UI updates 100% offline.
+     * Step 2 (Background async AI tagging): Launch non-blocking Gemini tagging per saved item;
+     * if API fails or API Key is blank, preserve the image and mark "待同步標籤（可點擊重試）" with HTTP detail.
      */
     fun ingestClothingUris(uris: List<Uri>) {
         if (uris.isEmpty()) return
-        val apiKey = uiState.value.geminiApiKey
-        if (apiKey.isBlank()) {
-            localState.update {
-                it.copy(
-                    showApiKeyDialog = true,
-                    snackbarMessage = "請先設定 Gemini API Key 以啟用衣物自動去背打標"
-                )
-            }
-            return
-        }
 
         viewModelScope.launch {
             localState.update {
                 it.copy(
+                    selectedCategoryFilter = "全部",
                     isImportingGarments = true,
-                    importStatusText = "準備處理 ${uris.size} 件衣物..."
+                    importStatusText = "正在本機儲存 ${uris.size} 件衣物影像..."
                 )
             }
 
-            var successCount = 0
-            var lastError: String? = null
+            val currentApiKey = repository.settings.geminiApiKeyFlow.first()
+            val currentTaggingModel = repository.settings.taggingModelFlow.first()
+            var savedCount = 0
+            var lastSaveError: String? = null
+            val pendingItems = mutableListOf<ClothingItem>()
 
             uris.forEachIndexed { index, uri ->
                 runCatching {
                     localState.update {
-                        it.copy(importStatusText = "(${index + 1}/${uris.size}) 端側 ML Kit 去背中...")
+                        it.copy(importStatusText = "(${index + 1}/${uris.size}) 本機安全壓縮與去背中...")
                     }
-                    val segmented = backgroundRemover.removeBackground(uri)
-
-                    localState.update {
-                        it.copy(importStatusText = "(${index + 1}/${uris.size}) Gemini 自動辨識標籤...")
-                    }
-                    val tags = geminiService.autoTagGarment(apiKey, segmented.cutoutBitmap)
-                    val cutoutPath = repository.saveClothingBitmapToInternal(segmented.cutoutBitmap)
-
-                    val entity = ClothingItem(
-                        imagePath = cutoutPath,
-                        category = tags.category,
-                        subCategory = tags.subCategory,
-                        color = tags.color,
-                        fit = tags.fit,
-                        styleTags = tags.styleTags,
-                        season = tags.season
+                    val sanitized = imageStorage.loadSafeBitmapFromUri(
+                        uri = uri,
+                        maxEdge = SafeImageStorage.MAX_IMAGE_EDGE_PX
                     )
-                    repository.insertClothingItem(entity)
-                    successCount++
+                    val segmented = backgroundRemover.removeBackgroundWithFallback(sanitized)
+                    val permanentPath = repository.saveClothingBitmapToInternal(
+                        bitmap = segmented.cutoutBitmap,
+                        preferPng = segmented.foregroundDetected
+                    )
+
+                    val hasKey = currentApiKey.isNotBlank()
+                    val initialEntity = ClothingItem(
+                        imagePath = permanentPath,
+                        category = "待分類",
+                        subCategory = if (hasKey) "分析標籤中..." else "待同步標籤",
+                        color = "待分析",
+                        fit = "合身",
+                        styleTags = emptyList(),
+                        season = emptyList(),
+                        tagStatus = if (hasKey) {
+                            ClothingItem.TAG_STATUS_PENDING
+                        } else {
+                            ClothingItem.TAG_STATUS_FAILED
+                        },
+                        tagError = if (hasKey) {
+                            null
+                        } else {
+                            "尚未設定 Gemini API Key，請先至設定輸入後點擊重試"
+                        }
+                    )
+                    val newId = repository.insertClothingItem(initialEntity)
+                    initialEntity.copy(id = newId)
+                }.onSuccess { inserted ->
+                    savedCount++
+                    if (currentApiKey.isNotBlank()) {
+                        pendingItems.add(inserted)
+                    }
                 }.onFailure { err ->
-                    lastError = err.message
+                    lastSaveError = err.message
                 }
             }
 
@@ -348,12 +417,116 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     isImportingGarments = false,
                     importStatusText = "",
                     snackbarMessage = when {
-                        successCount == uris.size -> "成功去背並打標入庫 $successCount 件單品"
-                        successCount > 0 -> "已入庫 $successCount/${uris.size} 件（部分失敗：${lastError ?: "未知錯誤"}）"
-                        else -> lastError ?: "衣物入庫失敗"
+                        savedCount == 0 -> lastSaveError ?: "無法讀取並儲存選取的圖片"
+                        currentApiKey.isBlank() -> "已離線儲存 $savedCount 件單品（尚未設定 API Key，可稍後一鍵補標籤）"
+                        else -> "已立即入庫 $savedCount 件單品，背景 AI 打標同步中..."
                     }
                 )
             }
+
+            // Stage 2: Non-blocking background Gemini tagging for each saved item
+            pendingItems.forEach { savedItem ->
+                launch {
+                    runBackgroundTagging(savedItem, currentApiKey, currentTaggingModel)
+                }
+            }
+        }
+    }
+
+    fun retryGarmentTagging(item: ClothingItem) {
+        viewModelScope.launch {
+            val apiKey = repository.settings.geminiApiKeyFlow.first()
+            val taggingModel = repository.settings.taggingModelFlow.first()
+            if (apiKey.isBlank()) {
+                localState.update {
+                    it.copy(
+                        showApiKeyDialog = true,
+                        snackbarMessage = "請先設定 Gemini API Key 後再同步衣物標籤"
+                    )
+                }
+                return@launch
+            }
+
+            val pendingItem = item.copy(
+                subCategory = "重新分析中...",
+                tagStatus = ClothingItem.TAG_STATUS_PENDING,
+                tagError = null
+            )
+            repository.updateClothingItem(pendingItem)
+            runBackgroundTagging(pendingItem, apiKey, taggingModel)
+        }
+    }
+
+    fun retryAllFailedTagging() {
+        viewModelScope.launch {
+            val apiKey = repository.settings.geminiApiKeyFlow.first()
+            val taggingModel = repository.settings.taggingModelFlow.first()
+            if (apiKey.isBlank()) {
+                localState.update {
+                    it.copy(
+                        showApiKeyDialog = true,
+                        snackbarMessage = "請先設定 Gemini API Key 後再重試同步標籤"
+                    )
+                }
+                return@launch
+            }
+
+            val failedItems = repository.getAllClothingSnapshot().filter {
+                it.tagStatus == ClothingItem.TAG_STATUS_FAILED
+            }
+            if (failedItems.isEmpty()) return@launch
+
+            localState.update {
+                it.copy(snackbarMessage = "正在背景重新同步 ${failedItems.size} 件單品標籤...")
+            }
+            failedItems.forEach { item ->
+                launch {
+                    val pendingItem = item.copy(
+                        subCategory = "重新分析中...",
+                        tagStatus = ClothingItem.TAG_STATUS_PENDING,
+                        tagError = null
+                    )
+                    repository.updateClothingItem(pendingItem)
+                    runBackgroundTagging(pendingItem, apiKey, taggingModel)
+                }
+            }
+        }
+    }
+
+    private suspend fun runBackgroundTagging(
+        item: ClothingItem,
+        apiKey: String,
+        taggingModelId: String
+    ) {
+        runCatching {
+            val bitmap = imageStorage.decodeStoredBitmap(item.imagePath, maxEdge = 768)
+                ?: error("找不到本機衣物影像檔案")
+            geminiService.autoTagGarment(
+                apiKey = apiKey,
+                modelId = taggingModelId,
+                garmentBitmap = bitmap
+            )
+        }.onSuccess { tags ->
+            repository.updateClothingItem(
+                item.copy(
+                    category = tags.category,
+                    subCategory = tags.subCategory,
+                    color = tags.color,
+                    fit = tags.fit,
+                    styleTags = tags.styleTags,
+                    season = tags.season,
+                    tagStatus = ClothingItem.TAG_STATUS_DONE,
+                    tagError = null
+                )
+            )
+        }.onFailure { err ->
+            repository.updateClothingItem(
+                item.copy(
+                    subCategory = "待同步標籤",
+                    tagStatus = ClothingItem.TAG_STATUS_FAILED,
+                    tagError = err.message ?: "Gemini 自動打標失敗"
+                )
+            )
         }
     }
 
@@ -374,10 +547,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         runVirtualTryOn(forceRegenerate = false)
     }
 
-    /**
-     * Executes virtual try-on for the active base PersonPhoto + currently selected clothing IDs.
-     * Checks SHA-256 Room cache first so identical combinations open instantaneously at 0 API cost.
-     */
     fun runVirtualTryOn(
         forceRegenerate: Boolean = false,
         overrideClothingIds: List<Long>? = null
@@ -418,7 +587,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            val apiKey = snapshot.geminiApiKey
+            val apiKey = repository.settings.geminiApiKeyFlow.first()
+            val tryOnModel = repository.settings.tryOnModelFlow.first()
             if (apiKey.isBlank()) {
                 localState.update {
                     it.copy(
@@ -432,27 +602,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             localState.update {
                 it.copy(
                     isGeneratingTryOn = true,
-                    tryOnStatusText = "正在透過 ${snapshot.tryOnModel} 寫實合成全身實穿照...",
+                    tryOnStatusText = "正在透過 $tryOnModel 寫實合成全身實穿照...",
                     beforePhotoPath = activePerson.imagePath
                 )
             }
 
             runCatching {
-                val personBitmap = backgroundRemover.decodeFileBitmap(activePerson.imagePath, maxEdge = 1536)
-                    ?: error("找不到全身基準照檔案")
+                val personBitmap = imageStorage.decodeStoredBitmap(
+                    activePerson.imagePath,
+                    maxEdge = SafeImageStorage.MAX_IMAGE_EDGE_PX
+                ) ?: error("找不到全身基準照檔案")
 
                 val orderedClothing = repository.getClothingByIds(selectedIds)
                     .sortedWith(compareBy { categoryLayerOrder(it.category) })
 
                 val clothingBitmaps = orderedClothing.mapNotNull { garment ->
-                    backgroundRemover.decodeFileBitmap(garment.imagePath, maxEdge = 1024)
+                    imageStorage.decodeStoredBitmap(garment.imagePath, maxEdge = 1024)
                         ?.let { bmp -> garment to bmp }
                 }
-                require(clothingBitmaps.isNotEmpty()) { "無法讀取選定衣物的去背圖" }
+                require(clothingBitmaps.isNotEmpty()) { "無法讀取選定衣物的圖片檔案" }
 
                 val generated = geminiService.generateVirtualTryOn(
                     apiKey = apiKey,
-                    modelId = snapshot.tryOnModel,
+                    modelId = tryOnModel,
                     personBitmap = personBitmap,
                     clothingItems = clothingBitmaps
                 )
@@ -461,7 +633,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     personPhoto = activePerson,
                     clothingIds = selectedIds,
                     resultBitmap = generated,
-                    modelUsed = snapshot.tryOnModel
+                    modelUsed = tryOnModel
                 )
             }.onSuccess { cachedEntry ->
                 localState.update {
@@ -509,7 +681,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val resultPath = uiState.value.afterResultPath ?: return
         viewModelScope.launch {
             runCatching {
-                val bmp = backgroundRemover.decodeFileBitmap(resultPath, maxEdge = 2400)
+                val bmp = imageStorage.decodeStoredBitmap(resultPath, maxEdge = 2400)
                     ?: error("找不到實穿結果影像")
                 repository.saveBitmapToGallery(bmp).getOrThrow()
             }.onSuccess {
@@ -539,37 +711,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun jumpToStylistWithAnchor(item: ClothingItem) {
+        val displayTitle = if (item.tagStatus == ClothingItem.TAG_STATUS_DONE) {
+            "${item.color}${item.subCategory}"
+        } else {
+            "這件選中單品（ID=${item.id}）"
+        }
         localState.update {
             it.copy(
                 selectedTab = AppTab.STYLIST,
                 anchorItemId = item.id,
-                customStylistPrompt = "我想穿這件${item.color}${item.subCategory}，幫我從衣櫃配一套"
+                customStylistPrompt = "我想穿${displayTitle}，幫我從衣櫃配一套"
             )
         }
     }
 
     fun generateOutfitRecommendations() {
         val snapshot = uiState.value
-        val apiKey = snapshot.geminiApiKey
-        if (apiKey.isBlank()) {
-            localState.update {
-                it.copy(
-                    showApiKeyDialog = true,
-                    snackbarMessage = "請先設定 Gemini API Key 以產生 AI 穿搭推薦"
-                )
-            }
-            return
-        }
-
         viewModelScope.launch {
+            val apiKey = repository.settings.geminiApiKeyFlow.first()
+            val taggingModel = repository.settings.taggingModelFlow.first()
+            if (apiKey.isBlank()) {
+                localState.update {
+                    it.copy(
+                        showApiKeyDialog = true,
+                        snackbarMessage = "請先設定 Gemini API Key 以產生 AI 穿搭推薦"
+                    )
+                }
+                return@launch
+            }
+
             localState.update {
                 it.copy(isGeneratingRecommendations = true)
             }
             runCatching {
-                val items = repository.getAllClothingSnapshot()
+                val allItems = repository.getAllClothingSnapshot()
+                require(allItems.isNotEmpty()) { "數位衣櫃目前沒有單品，請先拍攝或匯入衣物" }
+                val readyItems = allItems.filter {
+                    it.tagStatus == ClothingItem.TAG_STATUS_DONE || it.id == snapshot.anchorItemId
+                }
+                require(allItems.any { it.tagStatus == ClothingItem.TAG_STATUS_DONE }) {
+                    "衣櫃單品尚待完成 AI 標籤同步，請先於衣櫃卡片點擊重試標籤"
+                }
                 geminiService.recommendOutfits(
                     apiKey = apiKey,
-                    wardrobe = items,
+                    modelId = taggingModel,
+                    wardrobe = readyItems,
                     stylePreset = snapshot.selectedStylePreset,
                     customRequest = snapshot.customStylistPrompt,
                     anchorItemId = snapshot.anchorItemId
@@ -579,7 +765,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     it.copy(
                         isGeneratingRecommendations = false,
                         recommendations = recs,
-                        snackbarMessage = "已為您挑選 ${recs.size} 套衣櫃實穿組合（極簡 JSON 低 Token 推理）"
+                        snackbarMessage = "已透過 $taggingModel 為您挑選 ${recs.size} 套衣櫃穿搭組合"
                     )
                 }
             }.onFailure { err ->

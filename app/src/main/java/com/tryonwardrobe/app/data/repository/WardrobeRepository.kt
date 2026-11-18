@@ -9,6 +9,7 @@ import android.os.Environment
 import android.provider.MediaStore
 import com.tryonwardrobe.app.data.local.ClothingItem
 import com.tryonwardrobe.app.data.local.PersonPhoto
+import com.tryonwardrobe.app.data.local.SafeImageStorage
 import com.tryonwardrobe.app.data.local.TryOnCache
 import com.tryonwardrobe.app.data.local.WardrobeDao
 import com.tryonwardrobe.app.data.preferences.SettingsDataStore
@@ -17,36 +18,19 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileOutputStream
 import java.security.MessageDigest
-import java.util.UUID
 
 class WardrobeRepository(
     private val context: Context,
     private val dao: WardrobeDao,
-    val settings: SettingsDataStore
+    val settings: SettingsDataStore,
+    val imageStorage: SafeImageStorage
 ) {
 
     val allClothingFlow: Flow<List<ClothingItem>> = dao.observeAllClothing()
     val allPersonPhotosFlow: Flow<List<PersonPhoto>> = dao.observeAllPersonPhotos()
     val recentTryOnCachesFlow: Flow<List<TryOnCache>> = dao.observeRecentTryOnCaches()
 
-    private val wardrobeDir: File by lazy {
-        File(context.filesDir, "wardrobe_cutouts").apply { mkdirs() }
-    }
-
-    private val basePhotosDir: File by lazy {
-        File(context.filesDir, "base_person_photos").apply { mkdirs() }
-    }
-
-    private val tryOnCacheDir: File by lazy {
-        File(context.filesDir, "try_on_cache").apply { mkdirs() }
-    }
-
-    /**
-     * Deterministic SHA-256 key using (personPhotoId + sorted clothingIds)
-     * so repeated identical try-on combinations hit local cache without consuming Gemini quota.
-     */
     fun buildTryOnCacheKey(personPhotoId: Long, clothingIds: List<Long>): String {
         val sortedIds = clothingIds.distinct().sorted()
         val raw = "$personPhotoId:${sortedIds.joinToString(",")}"
@@ -54,39 +38,23 @@ class WardrobeRepository(
         return digest.joinToString("") { "%02x".format(it) }
     }
 
-    suspend fun saveClothingBitmapToInternal(bitmap: Bitmap): String = withContext(Dispatchers.IO) {
-        val file = File(wardrobeDir, "garment_${UUID.randomUUID()}.png")
-        FileOutputStream(file).use { out ->
-            bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
-        }
-        file.absolutePath
-    }
+    suspend fun saveClothingBitmapToInternal(bitmap: Bitmap, preferPng: Boolean = true): String =
+        imageStorage.saveWardrobeBitmap(bitmap, preferPng = preferPng)
 
-    suspend fun savePersonBitmapToInternal(bitmap: Bitmap): String = withContext(Dispatchers.IO) {
-        val file = File(basePhotosDir, "person_${UUID.randomUUID()}.jpg")
-        FileOutputStream(file).use { out ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 94, out)
-        }
-        file.absolutePath
-    }
-
-    suspend fun saveTryOnResultToInternal(cacheKey: String, bitmap: Bitmap): String =
-        withContext(Dispatchers.IO) {
-            val file = File(tryOnCacheDir, "tryon_${cacheKey.take(16)}_${System.currentTimeMillis()}.jpg")
-            FileOutputStream(file).use { out ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
-            }
-            file.absolutePath
-        }
+    suspend fun savePersonBitmapToInternal(bitmap: Bitmap): String =
+        imageStorage.saveFullBodyBitmap(bitmap)
 
     suspend fun insertClothingItem(item: ClothingItem): Long = withContext(Dispatchers.IO) {
         dao.insertClothing(item)
     }
 
+    suspend fun updateClothingItem(item: ClothingItem) = withContext(Dispatchers.IO) {
+        dao.updateClothing(item)
+    }
+
     suspend fun deleteClothingItem(item: ClothingItem) = withContext(Dispatchers.IO) {
         dao.deleteClothing(item)
         runCatching { File(item.imagePath).delete() }
-        // Clean up any cached try-on results referencing this deleted clothing item
         val allCaches = dao.observeRecentTryOnCaches().first()
         allCaches.filter { item.id in it.clothingIds }.forEach { cache ->
             dao.deleteTryOnCache(cache)
@@ -150,7 +118,7 @@ class WardrobeRepository(
         dao.getTryOnCacheByKey(cacheKey)?.let { previous ->
             runCatching { File(previous.resultImagePath).delete() }
         }
-        val resultPath = saveTryOnResultToInternal(cacheKey, resultBitmap)
+        val resultPath = imageStorage.saveTryOnResultBitmap(cacheKey, resultBitmap)
         val entry = TryOnCache(
             cacheKey = cacheKey,
             personPhotoId = personPhoto.id,

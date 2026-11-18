@@ -98,7 +98,7 @@ fun AiStylistScreen(
                         tint = MaterialTheme.colorScheme.secondary
                     )
                     Text(
-                        text = "兩階段低額度管線：僅傳送衣櫃文字標籤 JSON 給 gemini-2.5-flash 挑選組合（0 圖片傳輸），確認套用後再生成全身寫實實穿。",
+                        text = "兩階段低額度管線：僅傳送衣櫃文字標籤 JSON 給 ${uiState.taggingModel} 挑選組合（0 圖片傳輸），確認套用後再以 ${uiState.tryOnModel} 生成全身寫實實穿。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -261,7 +261,7 @@ fun AiStylistScreen(
                             modifier = Modifier.size(20.dp)
                         )
                         Spacer(Modifier.width(10.dp))
-                        Text("gemini-2.5-flash 正在挑揀衣櫃組合...")
+                        Text("${uiState.taggingModel} 正在挑揀衣櫃組合...")
                     } else {
                         Icon(Icons.Rounded.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))

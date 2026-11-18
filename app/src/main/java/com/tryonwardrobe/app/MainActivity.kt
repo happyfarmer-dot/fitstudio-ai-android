@@ -173,6 +173,8 @@ class MainActivity : ComponentActivity() {
                                 onClearSelection = viewModel::clearSelectedClothing,
                                 onImportUris = viewModel::ingestClothingUris,
                                 onDeleteItem = viewModel::deleteClothingItem,
+                                onRetryTagging = viewModel::retryGarmentTagging,
+                                onRetryAllFailedTagging = viewModel::retryAllFailedTagging,
                                 onStyleWithAnchor = viewModel::jumpToStylistWithAnchor,
                                 onStartTryOn = viewModel::startTryOnWithSelectedFromWardrobe,
                                 onShowMessage = viewModel::showMessage
@@ -214,9 +216,18 @@ class MainActivity : ComponentActivity() {
                 if (uiState.showApiKeyDialog) {
                     ApiKeySettingsDialog(
                         initialApiKey = uiState.geminiApiKey,
-                        initialModel = uiState.tryOnModel,
+                        initialTaggingModel = uiState.taggingModel,
+                        initialTryOnModel = uiState.tryOnModel,
+                        isTestingConnection = uiState.isTestingConnection,
+                        connectionTestResult = uiState.connectionTestResult,
+                        onTestConnection = { key, tagModel, tryOnModel ->
+                            viewModel.testGeminiConnection(key, tagModel, tryOnModel)
+                        },
+                        onClearTestResult = viewModel::clearConnectionTestResult,
                         onDismiss = { viewModel.setApiKeyDialogVisible(false) },
-                        onSave = { key, model -> viewModel.saveSettings(key, model) }
+                        onSave = { key, tagModel, tryOnModel ->
+                            viewModel.saveSettings(key, tagModel, tryOnModel)
+                        }
                     )
                 }
             }

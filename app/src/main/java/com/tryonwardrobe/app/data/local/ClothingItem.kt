@@ -14,5 +14,13 @@ data class ClothingItem(
     val fit: String,
     val styleTags: List<String>,
     val season: List<String>,
+    val tagStatus: String = TAG_STATUS_DONE,
+    val tagError: String? = null,
     val createdAt: Long = System.currentTimeMillis()
-)
+) {
+    companion object {
+        const val TAG_STATUS_PENDING = "PENDING"
+        const val TAG_STATUS_DONE = "DONE"
+        const val TAG_STATUS_FAILED = "FAILED"
+    }
+}

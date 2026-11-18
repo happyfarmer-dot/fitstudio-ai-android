@@ -2,26 +2,27 @@ package com.tryonwardrobe.app.service.vision
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Matrix
-import android.net.Uri
-import androidx.exifinterface.media.ExifInterface
 import com.google.android.gms.common.moduleinstall.ModuleInstall
 import com.google.android.gms.common.moduleinstall.ModuleInstallRequest
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.segmentation.subject.SubjectSegmentation
 import com.google.mlkit.vision.segmentation.subject.SubjectSegmenter
 import com.google.mlkit.vision.segmentation.subject.SubjectSegmenterOptions
+import com.tryonwardrobe.app.data.local.SafeImageStorage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
-import java.io.File
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
+/**
+ * Offline ML Kit Subject Segmentation wrapper.
+ * Accepts already-sanitized Bitmaps from SafeImageStorage and wraps segmentation in runCatching
+ * so local garment saving never fails if ML Kit is offline or detects no foreground.
+ */
 class BackgroundRemover(private val context: Context) {
 
     data class SegmentationOutput(
@@ -29,63 +30,46 @@ class BackgroundRemover(private val context: Context) {
         val foregroundDetected: Boolean
     )
 
-    suspend fun removeBackground(uri: Uri): SegmentationOutput = withContext(Dispatchers.Default) {
-        val decoded = decodeCorrectedBitmapFromUri(uri, minEdge = 512, maxEdge = 1440)
-            ?: throw IllegalArgumentException("無法讀取選取的圖片檔案")
-        removeBackground(decoded)
-    }
-
-    suspend fun removeBackground(sourceBitmap: Bitmap): SegmentationOutput =
+    suspend fun removeBackgroundWithFallback(sourceBitmap: Bitmap): SegmentationOutput =
         withContext(Dispatchers.Default) {
-            val prepared = ensureMinAndMaxDimension(
-                sourceBitmap,
-                minEdge = 512,
-                maxEdge = 1440,
-                recycleOriginal = false
-            )
-            val options = SubjectSegmenterOptions.Builder()
-                .enableForegroundBitmap()
-                .build()
-
-            val segmenter = SubjectSegmentation.getClient(options)
-            try {
-                ensureModuleInstalled(segmenter)
-                val inputImage = InputImage.fromBitmap(prepared, 0)
-                val result = segmenter.process(inputImage).await()
-                val rawForeground = result.foregroundBitmap
-
-                if (rawForeground != null && hasMeaningfulForeground(rawForeground)) {
-                    val trimmed = trimTransparentBounds(rawForeground, paddingPx = 16)
-                    SegmentationOutput(cutoutBitmap = trimmed, foregroundDetected = true)
-                } else {
-                    SegmentationOutput(cutoutBitmap = prepared, foregroundDetected = false)
-                }
-            } finally {
-                runCatching { segmenter.close() }
+            runCatching {
+                segmentForeground(sourceBitmap)
+            }.getOrElse {
+                SegmentationOutput(
+                    cutoutBitmap = sourceBitmap,
+                    foregroundDetected = false
+                )
             }
         }
 
-    suspend fun prepareBasePersonPhoto(uri: Uri): Bitmap = withContext(Dispatchers.IO) {
-        decodeCorrectedBitmapFromUri(uri, minEdge = 512, maxEdge = 1536)
-            ?: throw IllegalArgumentException("無法讀取全身基準照")
-    }
+    private suspend fun segmentForeground(sourceBitmap: Bitmap): SegmentationOutput {
+        // ML Kit Subject Segmentation works best when shortest side is >= 512px
+        val mlInput = ensureMinDimensionForInference(
+            sourceBitmap,
+            minEdge = 512,
+            maxEdge = SafeImageStorage.MAX_IMAGE_EDGE_PX
+        )
+        val options = SubjectSegmenterOptions.Builder()
+            .enableForegroundBitmap()
+            .build()
 
-    suspend fun prepareBasePersonPhotoFromFile(file: File): Bitmap = withContext(Dispatchers.IO) {
-        decodeCorrectedBitmapFromFile(file, minEdge = 512, maxEdge = 1536)
-            ?: throw IllegalArgumentException("無法讀取拍攝的全身基準照")
-    }
+        val segmenter = SubjectSegmentation.getClient(options)
+        try {
+            ensureModuleInstalled(segmenter)
+            val inputImage = InputImage.fromBitmap(mlInput, 0)
+            val result = segmenter.process(inputImage).await()
+            val rawForeground = result.foregroundBitmap
 
-    fun decodeFileBitmap(path: String, maxEdge: Int = 1600): Bitmap? {
-        val file = File(path)
-        if (!file.exists()) return null
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(file.absolutePath, bounds)
-        val sampleSize = calculateInSampleSize(bounds.outWidth, bounds.outHeight, maxEdge)
-        val opts = BitmapFactory.Options().apply {
-            inSampleSize = sampleSize
-            inPreferredConfig = Bitmap.Config.ARGB_8888
+            return if (rawForeground != null && hasMeaningfulForeground(rawForeground)) {
+                val trimmed = trimTransparentBounds(rawForeground, paddingPx = 16)
+                val bounded = capMaxEdge(trimmed, SafeImageStorage.MAX_IMAGE_EDGE_PX)
+                SegmentationOutput(cutoutBitmap = bounded, foregroundDetected = true)
+            } else {
+                SegmentationOutput(cutoutBitmap = sourceBitmap, foregroundDetected = false)
+            }
+        } finally {
+            runCatching { segmenter.close() }
         }
-        return BitmapFactory.decodeFile(file.absolutePath, opts)
     }
 
     private suspend fun ensureModuleInstalled(segmenter: SubjectSegmenter) {
@@ -105,119 +89,33 @@ class BackgroundRemover(private val context: Context) {
         }
     }
 
-    private fun decodeCorrectedBitmapFromUri(
-        uri: Uri,
-        minEdge: Int,
-        maxEdge: Int
-    ): Bitmap? {
-        val resolver = context.contentResolver
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        resolver.openInputStream(uri)?.use { stream ->
-            BitmapFactory.decodeStream(stream, null, bounds)
-        } ?: return null
-
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
-
-        val sampleSize = calculateInSampleSize(bounds.outWidth, bounds.outHeight, maxEdge)
-        val decodeOpts = BitmapFactory.Options().apply {
-            inSampleSize = sampleSize
-            inPreferredConfig = Bitmap.Config.ARGB_8888
-        }
-
-        val rawBitmap = resolver.openInputStream(uri)?.use { stream ->
-            BitmapFactory.decodeStream(stream, null, decodeOpts)
-        } ?: return null
-
-        val orientation = resolver.openInputStream(uri)?.use { stream ->
-            ExifInterface(stream).getAttributeInt(
-                ExifInterface.TAG_ORIENTATION,
-                ExifInterface.ORIENTATION_NORMAL
-            )
-        } ?: ExifInterface.ORIENTATION_NORMAL
-
-        val upright = applyExifTransform(rawBitmap, orientation)
-        return ensureMinAndMaxDimension(upright, minEdge = minEdge, maxEdge = maxEdge)
-    }
-
-    private fun decodeCorrectedBitmapFromFile(
-        file: File,
-        minEdge: Int,
-        maxEdge: Int
-    ): Bitmap? {
-        if (!file.exists()) return null
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(file.absolutePath, bounds)
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
-
-        val sampleSize = calculateInSampleSize(bounds.outWidth, bounds.outHeight, maxEdge)
-        val decodeOpts = BitmapFactory.Options().apply {
-            inSampleSize = sampleSize
-            inPreferredConfig = Bitmap.Config.ARGB_8888
-        }
-        val rawBitmap = BitmapFactory.decodeFile(file.absolutePath, decodeOpts) ?: return null
-        val orientation = ExifInterface(file.absolutePath).getAttributeInt(
-            ExifInterface.TAG_ORIENTATION,
-            ExifInterface.ORIENTATION_NORMAL
-        )
-        val upright = applyExifTransform(rawBitmap, orientation)
-        return ensureMinAndMaxDimension(upright, minEdge = minEdge, maxEdge = maxEdge)
-    }
-
-    private fun calculateInSampleSize(width: Int, height: Int, maxEdge: Int): Int {
-        var inSampleSize = 1
-        val longest = max(width, height)
-        if (longest > maxEdge) {
-            while ((longest / inSampleSize) > maxEdge * 2) {
-                inSampleSize *= 2
-            }
-        }
-        return max(1, inSampleSize)
-    }
-
-    private fun applyExifTransform(bitmap: Bitmap, orientation: Int): Bitmap {
-        val matrix = Matrix()
-        when (orientation) {
-            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
-            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
-            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
-            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.preScale(-1f, 1f)
-            ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.preScale(1f, -1f)
-            ExifInterface.ORIENTATION_TRANSPOSE -> {
-                matrix.postRotate(90f)
-                matrix.preScale(-1f, 1f)
-            }
-            ExifInterface.ORIENTATION_TRANSVERSE -> {
-                matrix.postRotate(270f)
-                matrix.preScale(-1f, 1f)
-            }
-            else -> return bitmap
-        }
-        val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-        if (rotated !== bitmap) bitmap.recycle()
-        return rotated
-    }
-
-    private fun ensureMinAndMaxDimension(
+    private fun ensureMinDimensionForInference(
         bitmap: Bitmap,
         minEdge: Int,
-        maxEdge: Int,
-        recycleOriginal: Boolean = true
+        maxEdge: Int
     ): Bitmap {
         val longest = max(bitmap.width, bitmap.height)
         val shortest = min(bitmap.width, bitmap.height)
-
         val scale = when {
             longest > maxEdge -> maxEdge.toFloat() / longest.toFloat()
             shortest < minEdge -> minEdge.toFloat() / shortest.toFloat()
             else -> 1f
         }
         if (scale == 1f) return bitmap
-
         val targetW = max(1, (bitmap.width * scale).roundToInt())
         val targetH = max(1, (bitmap.height * scale).roundToInt())
-        val resized = Bitmap.createScaledBitmap(bitmap, targetW, targetH, true)
-        if (recycleOriginal && resized !== bitmap) bitmap.recycle()
-        return resized
+        return Bitmap.createScaledBitmap(bitmap, targetW, targetH, true)
+    }
+
+    private fun capMaxEdge(bitmap: Bitmap, maxEdge: Int): Bitmap {
+        val longest = max(bitmap.width, bitmap.height)
+        if (longest <= maxEdge) return bitmap
+        val ratio = maxEdge.toFloat() / longest.toFloat()
+        val targetW = max(1, (bitmap.width * ratio).roundToInt())
+        val targetH = max(1, (bitmap.height * ratio).roundToInt())
+        val scaled = Bitmap.createScaledBitmap(bitmap, targetW, targetH, true)
+        if (scaled !== bitmap) bitmap.recycle()
+        return scaled
     }
 
     private fun hasMeaningfulForeground(bitmap: Bitmap): Boolean {

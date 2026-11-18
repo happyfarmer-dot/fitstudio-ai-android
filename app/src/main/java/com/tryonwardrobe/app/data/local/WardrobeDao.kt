@@ -5,6 +5,7 @@ import androidx.room.Delete
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -22,6 +23,9 @@ interface WardrobeDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertClothing(item: ClothingItem): Long
+
+    @Update
+    suspend fun updateClothing(item: ClothingItem)
 
     @Delete
     suspend fun deleteClothing(item: ClothingItem)

@@ -39,11 +39,14 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Checkroom
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.PhotoLibrary
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Style
+import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -85,6 +88,8 @@ fun WardrobeScreen(
     onClearSelection: () -> Unit,
     onImportUris: (List<Uri>) -> Unit,
     onDeleteItem: (ClothingItem) -> Unit,
+    onRetryTagging: (ClothingItem) -> Unit,
+    onRetryAllFailedTagging: () -> Unit,
     onStyleWithAnchor: (ClothingItem) -> Unit,
     onStartTryOn: () -> Unit,
     onShowMessage: (String) -> Unit,
@@ -150,6 +155,10 @@ fun WardrobeScreen(
         }
     }
 
+    val failedTagCount = remember(uiState.clothingItems) {
+        uiState.clothingItems.count { it.tagStatus == ClothingItem.TAG_STATUS_FAILED }
+    }
+
     val displayedItems = remember(uiState.clothingItems, uiState.selectedCategoryFilter) {
         if (uiState.selectedCategoryFilter == "全部") {
             uiState.clothingItems
@@ -178,7 +187,7 @@ fun WardrobeScreen(
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(Modifier.width(6.dp))
-                    Text("拍攝單品去背")
+                    Text("拍攝單品入庫")
                 }
 
                 Button(
@@ -200,7 +209,7 @@ fun WardrobeScreen(
                 }
             }
 
-            // Live ML Kit + Gemini Ingestion Status
+            // Stage 1 Local Storage & Segmentation Progress
             AnimatedVisibility(visible = uiState.isImportingGarments) {
                 Surface(
                     color = MaterialTheme.colorScheme.secondaryContainer,
@@ -214,12 +223,50 @@ fun WardrobeScreen(
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = uiState.importStatusText.ifBlank { "端側去背與自動打標進行中..." },
+                            text = uiState.importStatusText.ifBlank { "本機安全壓縮與端側去背進行中..." },
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.onSecondaryContainer,
                             fontWeight = FontWeight.SemiBold
                         )
                         LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                }
+            }
+
+            // Failed Background Tagging Batch Retry Banner
+            AnimatedVisibility(visible = failedTagCount > 0) {
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.72f),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.WarningAmber,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = "有 $failedTagCount 件單品影像已存妥，待同步 AI 標籤",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        }
+                        TextButton(onClick = onRetryAllFailedTagging) {
+                            Text("全部重試", fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
@@ -272,7 +319,7 @@ fun WardrobeScreen(
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "匯入或拍攝單件衣物後，App 會於手機離線透過 ML Kit 自動去背，再由 Gemini 2.5 Flash 自動建立版型、色系與季節標籤。",
+                                text = "拍照或匯入衣物時，會優先安全儲存轉正影像至本機並執行端側 ML Kit 去背，隨後於背景以 ${uiState.taggingModel} 非同步辨識標籤。",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -305,6 +352,7 @@ fun WardrobeScreen(
                             isSelected = isSelected,
                             onToggleSelect = { onToggleItemSelection(item.id) },
                             onDelete = { onDeleteItem(item) },
+                            onRetryTagging = { onRetryTagging(item) },
                             onStyleWithAnchor = { onStyleWithAnchor(item) }
                         )
                     }
@@ -378,8 +426,12 @@ private fun GarmentCard(
     isSelected: Boolean,
     onToggleSelect: () -> Unit,
     onDelete: () -> Unit,
+    onRetryTagging: () -> Unit,
     onStyleWithAnchor: () -> Unit
 ) {
+    val isPending = item.tagStatus == ClothingItem.TAG_STATUS_PENDING
+    val isFailed = item.tagStatus == ClothingItem.TAG_STATUS_FAILED
+
     Card(
         shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -451,18 +503,34 @@ private fun GarmentCard(
 
                 // Category Pill Bottom-Left
                 Surface(
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.86f),
+                    color = if (isFailed) {
+                        MaterialTheme.colorScheme.error.copy(alpha = 0.9f)
+                    } else {
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.86f)
+                    },
                     shape = RoundedCornerShape(999.dp),
                     modifier = Modifier
                         .align(Alignment.BottomStart)
                         .padding(8.dp)
                 ) {
-                    Text(
-                        text = item.category,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        style = MaterialTheme.typography.labelSmall,
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                    )
+                    ) {
+                        if (isPending) {
+                            CircularProgressIndicator(
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                strokeWidth = 1.5.dp,
+                                modifier = Modifier.size(10.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                        }
+                        Text(
+                            text = if (isPending) "AI 分析中" else item.category,
+                            color = if (isFailed) Color.White else MaterialTheme.colorScheme.onPrimary,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
                 }
             }
 
@@ -478,28 +546,81 @@ private fun GarmentCard(
                     overflow = TextOverflow.Ellipsis
                 )
 
-                Text(
-                    text = "${item.color} · ${item.fit}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                when {
+                    isFailed -> {
+                        Surface(
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(onClick = onRetryTagging)
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Refresh,
+                                        contentDescription = "重試打標",
+                                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(
+                                        text = "待同步標籤（點擊重試）",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                        maxLines = 1
+                                    )
+                                }
+                                if (!item.tagError.isNullOrBlank()) {
+                                    Text(
+                                        text = item.tagError,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.85f),
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
 
-                val mergedTags = (item.styleTags.take(2) + item.season.take(2)).distinct()
-                if (mergedTags.isNotEmpty()) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        mergedTags.take(3).forEach { tag ->
-                            Surface(
-                                color = MaterialTheme.colorScheme.surfaceVariant,
-                                shape = RoundedCornerShape(6.dp)
-                            ) {
-                                Text(
-                                    text = tag,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    maxLines = 1,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                )
+                    isPending -> {
+                        Text(
+                            text = "影像已存妥，背景同步標籤中...",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.secondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    else -> {
+                        Text(
+                            text = "${item.color} · ${item.fit}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+
+                        val mergedTags = (item.styleTags.take(2) + item.season.take(2)).distinct()
+                        if (mergedTags.isNotEmpty()) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                mergedTags.take(3).forEach { tag ->
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.surfaceVariant,
+                                        shape = RoundedCornerShape(6.dp)
+                                    ) {
+                                        Text(
+                                            text = tag,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            maxLines = 1,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
